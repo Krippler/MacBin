@@ -24,14 +24,8 @@
 #   UPLOAD           1 = upload to App Store Connect / TestFlight (app-store-connect)
 set -Eeuo pipefail
 
-# macOS ships bash 3.2; use Homebrew's bash (preinstalled on GitHub's runners).
-if (( BASH_VERSINFO[0] < 4 )); then
-  for b in /opt/homebrew/bin/bash /usr/local/bin/bash; do
-    if [[ -x $b ]]; then exec "$b" "$0" "$@"; fi
-  done
-  echo "::error title=MacBin::apple/build.sh needs bash 4 or newer (brew install bash)" >&2
-  exit 1
-fi
+# Written for the bash 3.2 that ships with macOS: no mapfile or ${x,,}, and
+# arrays that may be empty are expanded as ${a[@]+"${a[@]}"} (set -u).
 
 log()  { printf '[macbin-apple] %s\n' "$*" >&2; }
 die()  { printf '::error title=MacBin::%s\n' "$*" >&2; exit 1; }
@@ -63,7 +57,8 @@ if [[ -z ${LABEL:-} ]]; then
 fi
 [[ -n $NAME ]] || NAME=$(basename "$PWD")
 BASE="$NAME-$LABEL-$PLATFORM"
-read -ra extra <<<"$XCODEBUILD_ARGS"
+extra=()
+read -ra extra <<<"$XCODEBUILD_ARGS" || true
 
 WORK=$(mktemp -d "${RUNNER_TEMP:-/tmp}/macbin-apple.XXXXXX")
 KEYCHAIN=''
@@ -135,8 +130,9 @@ setup_signing() {
   local dirs=("$HOME/Library/MobileDevice/Provisioning Profiles"
               "$HOME/Library/Developer/Xcode/UserData/Provisioning Profiles")
   mkdir -p "${dirs[@]}"
-  IFS=',' read -ra profiles <<<"$PROFILES_BASE64"
-  for b64 in "${profiles[@]}"; do
+  profiles=()
+  IFS=',' read -ra profiles <<<"$PROFILES_BASE64" || true
+  for b64 in ${profiles[@]+"${profiles[@]}"}; do
     b64=${b64//[[:space:]]/}
     [[ -n $b64 ]] || continue
     i=$((i + 1))
@@ -160,19 +156,29 @@ setup_signing() {
   fi
 }
 
+xml_escape() { local v=${1//&/&amp;}; v=${v//</&lt;}; printf '%s' "${v//>/&gt;}"; }
+
 write_export_options() {
   local plist=$1 i
-  /usr/libexec/PlistBuddy -c "Add :method string $EXPORT_METHOD" "$plist" >/dev/null
-  /usr/libexec/PlistBuddy -c 'Add :signingStyle string manual' "$plist"
-  /usr/libexec/PlistBuddy -c "Add :signingCertificate string $IDENTITY" "$plist"
-  if [[ -n $TEAM_ID ]]; then /usr/libexec/PlistBuddy -c "Add :teamID string $TEAM_ID" "$plist"; fi
-  if (( UPLOAD )); then /usr/libexec/PlistBuddy -c 'Add :destination string upload' "$plist"; fi
-  if (( ${#PROFILE_MAP[@]} )); then
-    /usr/libexec/PlistBuddy -c 'Add :provisioningProfiles dict' "$plist"
-    for (( i = 0; i < ${#PROFILE_MAP[@]}; i += 2 )); do
-      /usr/libexec/PlistBuddy -c "Add :provisioningProfiles:${PROFILE_MAP[i]} string ${PROFILE_MAP[i+1]}" "$plist"
-    done
-  fi
+  {
+    echo '<?xml version="1.0" encoding="UTF-8"?>'
+    echo '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">'
+    echo '<plist version="1.0"><dict>'
+    echo "<key>method</key><string>$(xml_escape "$EXPORT_METHOD")</string>"
+    echo '<key>signingStyle</key><string>manual</string>'
+    echo "<key>signingCertificate</key><string>$IDENTITY</string>"
+    if [[ -n $TEAM_ID ]]; then echo "<key>teamID</key><string>$TEAM_ID</string>"; fi
+    if (( UPLOAD )); then echo '<key>destination</key><string>upload</string>'; fi
+    if (( ${#PROFILE_MAP[@]} )); then
+      echo '<key>provisioningProfiles</key><dict>'
+      for (( i = 0; i < ${#PROFILE_MAP[@]}; i += 2 )); do
+        echo "<key>$(xml_escape "${PROFILE_MAP[i]}")</key><string>$(xml_escape "${PROFILE_MAP[i+1]}")</string>"
+      done
+      echo '</dict>'
+    fi
+    echo '</dict></plist>'
+  } >"$plist"
+  plutil -lint -s "$plist" || die "could not write ExportOptions.plist"
 }
 
 ASC_ARGS=()
@@ -213,7 +219,7 @@ build_xcode() {
     sign=(CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY=)
   fi
   xcodebuild archive "${PROJ_ARGS[@]}" -scheme "$SCHEME" -configuration "$CONFIGURATION" \
-    -destination "$DESTINATION" -archivePath "$archive" "${sign[@]}" "${extra[@]}" | pretty
+    -destination "$DESTINATION" -archivePath "$archive" "${sign[@]}" ${extra[@]+"${extra[@]}"} | pretty
 
   local apps=("$archive"/Products/Applications/*.app)
   [[ -d ${apps[0]} ]] || die "the archive contains no app (is '$SCHEME' an application scheme?)"
@@ -238,7 +244,7 @@ build_xcode() {
   local opts=$WORK/ExportOptions.plist export=$WORK/export f
   write_export_options "$opts"
   xcodebuild -exportArchive -archivePath "$archive" -exportPath "$export" \
-    -exportOptionsPlist "$opts" "${ASC_ARGS[@]}" | pretty
+    -exportOptionsPlist "$opts" ${ASC_ARGS[@]+"${ASC_ARGS[@]}"} | pretty
   if (( UPLOAD )); then log "uploaded to App Store Connect"; fi
   for f in "$export"/*.ipa "$export"/*.pkg; do
     if [[ -f $f ]]; then cp "$f" "$OUTPUT_DIR/$BASE.${f##*.}"; fi
@@ -254,8 +260,10 @@ build_xcode() {
 build_swiftpm() {
   [[ $PLATFORM == macos ]] || die "Swift packages are built as macOS command-line tools (set platform: macos)"
   log "building Swift package $PROJECT (universal)"
-  local args=(-c "${CONFIGURATION,,}" --arch arm64 --arch x86_64 --package-path "$PROJECT")
-  swift build "${args[@]}" "${extra[@]}"
+  local config
+  config=$(printf '%s' "$CONFIGURATION" | tr '[:upper:]' '[:lower:]')
+  local args=(-c "$config" --arch arm64 --arch x86_64 --package-path "$PROJECT")
+  swift build "${args[@]}" ${extra[@]+"${extra[@]}"}
   local bin out=$WORK/$BASE p
   bin=$(swift build "${args[@]}" --show-bin-path)
   mkdir -p "$out"
@@ -286,12 +294,13 @@ setup_signing
 setup_api_key
 if [[ $KIND == swiftpm ]]; then build_swiftpm; else build_xcode; fi
 
-mapfile -t files < <(find "$OUTPUT_DIR" -maxdepth 1 -type f -name "$BASE*" | sort)
+files=()
+while IFS= read -r f; do files+=("$f"); done < <(find "$OUTPUT_DIR" -maxdepth 1 -type f -name "$BASE*" | sort)
 (( ${#files[@]} || UPLOAD )) || die "the build produced no files"
 {
   echo "output-dir=$OUTPUT_DIR"
   echo "files<<MACBIN_EOF"
-  printf '%s\n' "${files[@]}"
+  printf '%s\n' ${files[@]+"${files[@]}"}
   echo "MACBIN_EOF"
 } >>"${GITHUB_OUTPUT:-/dev/null}"
 {
@@ -299,6 +308,6 @@ mapfile -t files < <(find "$OUTPUT_DIR" -maxdepth 1 -type f -name "$BASE*" | sor
   echo
   echo "| File | Size |"
   echo "|---|---|"
-  for f in "${files[@]}"; do echo "| \`$(basename "$f")\` | $(( $(stat -f %z "$f") / 1024 )) KiB |"; done
+  for f in ${files[@]+"${files[@]}"}; do echo "| \`$(basename "$f")\` | $(( $(stat -f %z "$f") / 1024 )) KiB |"; done
 } >>"${GITHUB_STEP_SUMMARY:-/dev/null}"
-log "output: ${files[*]}"
+log "output: ${files[*]-}"
