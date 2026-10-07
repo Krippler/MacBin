@@ -5,7 +5,7 @@
 #
 #   jobs:
 #     ios:
-#       uses: Krippler/MacBin/.github/workflows/build-apple.yml@main
+#       uses: Krippler/MacBin/.github/workflows/build-apple.yml@v0.1.0
 #       permissions:
 #         contents: write        # only needed to attach files to releases
 #       with:
@@ -96,6 +96,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           repository: Krippler/MacBin
+          ref: v0.1.0
           path: .macbin-tool
           sparse-checkout: apple
 

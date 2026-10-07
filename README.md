@@ -32,7 +32,7 @@ farm's image auto-update is on, the runners pick up the new image on their own.
 
 To update MacBin later, change the version number to a newer `runner-base-X.Y.Z` tag from the
 [package page](https://github.com/Krippler/MacBin/pkgs/container/macbin), then Build and Restart
-again.
+again. Use the same version in the workflow references below (`@vX.Y.Z`).
 
 ## Building a project
 
@@ -46,7 +46,7 @@ on:
   workflow_dispatch:
 jobs:
   macos:
-    uses: Krippler/MacBin/.github/workflows/build-macos.yml@main
+    uses: Krippler/MacBin/.github/workflows/build-macos.yml@v0.1.0
     permissions:
       contents: write   # to attach the zips to the release
     with:
@@ -101,7 +101,7 @@ on:
 | `NOTARY_API_KEY` | Optional: an App Store Connect API key, converted with `rcodesign encode-app-store-connect-api-key -o key.json <issuer-id> <key-id> AuthKey_XXXX.p8`. Its content notarizes the zips. |
 
 ```yaml
-    uses: Krippler/MacBin/.github/workflows/build-macos.yml@main
+    uses: Krippler/MacBin/.github/workflows/build-macos.yml@v0.1.0
     secrets: inherit
 ```
 
@@ -152,7 +152,7 @@ on:
   workflow_dispatch:
 jobs:
   ios:
-    uses: Krippler/MacBin/.github/workflows/build-apple.yml@main
+    uses: Krippler/MacBin/.github/workflows/build-apple.yml@v0.1.0
     permissions:
       contents: write
     with:
