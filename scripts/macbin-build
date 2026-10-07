@@ -1,0 +1,720 @@
+#!/usr/bin/env bash
+# macbin-build - cross-compile a Git repository (or a local directory) into
+# macOS binaries using zig, Rust and Go, without an Apple SDK.
+#
+# Usage: macbin-build <git-url | owner/repo | /path/to/dir> [ref]
+#
+# Everything else is configured through environment variables; run with
+# --help for the full list.
+set -Eeuo pipefail
+
+MACBIN_HOME=${MACBIN_HOME:-/opt/macbin}
+# shellcheck source=../lib/common.sh
+source "$MACBIN_HOME/lib/common.sh"
+
+usage() {
+  cat <<'EOF'
+Usage: macbin-build <git-url | owner/repo | /path/to/dir> [ref]
+
+ref may be a branch, tag, commit SHA, or "@latest-tag" (highest version tag
+matching TAG_PATTERN). Without a ref the repository's default branch is used.
+
+Environment:
+  ARCH            universal (default; one arm64+x86_64 binary), arm64, x86_64,
+                  "both" (separate arm64 and x86_64) or "all" (all three)
+  MACOS_MIN       minimum macOS version (default 11.0)
+  MACOS_SDK       path to a MacOSX.sdk, for projects that link Apple frameworks
+  BUILD_SYSTEM    auto (default) | cmake | meson | autotools | make | cargo | go | custom
+  BUILD_CMD       shell command to build (implies BUILD_SYSTEM=custom); runs in the
+                  source dir with CC/CXX/HOST/PREFIX/... exported
+  SUBDIR          build from this subdirectory of the repository
+  BUILD_TYPE      Release (default) - used for cmake/meson
+  STATIC          1 = prefer static libraries (cmake/meson/autotools); default 0
+  CMAKE_ARGS, MESON_ARGS, CONFIGURE_ARGS, MAKE_ARGS, CARGO_ARGS
+                  extra arguments for the respective build system
+  GO_PACKAGES     packages to build (default: every main package except examples)
+  GO_ARGS, GO_LDFLAGS, GO_CGO=1
+  ARTIFACTS       space-separated globs (relative to the source dir) to collect
+                  instead of the automatic detection
+  PRE_BUILD_CMD   shell command run once in the source dir after checkout
+  TAG_PATTERN     regex used by @latest-tag (default: plain version tags)
+  BUNDLE_DYLIBS   1 (default) copy the project's own .dylibs next to binaries and
+                  point the binaries at them (@loader_path)
+  STRIP_BINARIES  1 (default) strip debug and local symbols
+  CODESIGN        adhoc (default), none, or developer-id (needs SIGN_P12)
+  SIGN_P12, SIGN_P12_PASSWORD
+                  Developer ID Application certificate (.p12 file) and its password;
+                  setting SIGN_P12 implies CODESIGN=developer-id
+  SIGN_TIMESTAMP_URL  timestamp server (default Apple's; "none" to skip)
+  NOTARY_API_KEY  App Store Connect API key JSON (rcodesign
+                  encode-app-store-connect-api-key) - notarizes the zips
+  ZIP             1 (default) produce a .zip per architecture
+  FORCE           1 = rebuild even if this commit/config was already built
+  GITHUB_TOKEN    token for private GitHub repositories
+  OUTPUT_NAME, OUTPUT_LABEL  override the <name>/<label> output folder names
+  UMASK           umask for created files (e.g. 000 for Unraid shares)
+  OUTPUT_DIR, WORK_DIR (under $RUNNER_TEMP)  CONFIG_DIR (.macbin)  JOBS (nproc)
+EOF
+}
+
+# ---------------------------------------------------------------- settings --
+# Defaults stay inside the runner's writable areas (RUNNER_TEMP on Actions).
+OUTPUT_DIR=${OUTPUT_DIR:-${RUNNER_TEMP:-/tmp}/macbin/output}
+WORK_DIR=${WORK_DIR:-${RUNNER_TEMP:-/tmp}/macbin/work}
+CONFIG_DIR=${CONFIG_DIR:-${GITHUB_WORKSPACE:-$PWD}/.macbin}
+OUTPUT_NAME=${OUTPUT_NAME:-}
+OUTPUT_LABEL=${OUTPUT_LABEL:-}
+ARCH=${ARCH:-universal}
+BUILD_CMD=${BUILD_CMD:-}
+BUILD_SYSTEM=${BUILD_SYSTEM:-auto}
+[[ -n $BUILD_CMD && $BUILD_SYSTEM == auto ]] && BUILD_SYSTEM=custom
+BUILD_TYPE=${BUILD_TYPE:-Release}
+SUBDIR=${SUBDIR:-}
+STATIC=${STATIC:-0}
+BUNDLE_DYLIBS=${BUNDLE_DYLIBS:-1}
+STRIP_BINARIES=${STRIP_BINARIES:-1}
+SIGN_TIMESTAMP_URL=${SIGN_TIMESTAMP_URL:-}
+SIGN_P12=${SIGN_P12:-} SIGN_P12_PASSWORD=${SIGN_P12_PASSWORD:-} NOTARY_API_KEY=${NOTARY_API_KEY:-}
+CODESIGN=${CODESIGN:-}
+[[ -z $CODESIGN ]] && { if [[ -n $SIGN_P12 ]]; then CODESIGN=developer-id; else CODESIGN=adhoc; fi; }
+ZIP=${ZIP:-1}
+FORCE=${FORCE:-0}
+KEEP_WORK=${KEEP_WORK:-0}
+JOBS=${JOBS:-$(nproc)}
+TAG_PATTERN=${TAG_PATTERN:-'^v?[0-9]+(\.[0-9]+)*$'}
+CMAKE_ARGS=${CMAKE_ARGS:-} MESON_ARGS=${MESON_ARGS:-} CONFIGURE_ARGS=${CONFIGURE_ARGS:-}
+MAKE_ARGS=${MAKE_ARGS:-} CARGO_ARGS=${CARGO_ARGS:-} GO_PACKAGES=${GO_PACKAGES:-}
+GO_ARGS=${GO_ARGS:-} GO_LDFLAGS=${GO_LDFLAGS:-} GO_CGO=${GO_CGO:-0}
+ARTIFACTS=${ARTIFACTS:-} PRE_BUILD_CMD=${PRE_BUILD_CMD:-}
+export MACOS_MIN=${MACOS_MIN:-11.0} MACOS_SDK=${MACOS_SDK:-}
+
+export GIT_TERMINAL_PROMPT=0
+# e.g. UMASK=000 so results on an Unraid share stay writable for SMB users.
+if [[ -n ${UMASK:-} ]]; then umask "$UMASK"; fi
+export CARGO_HOME=${CARGO_CACHE:-$WORK_DIR/cache/cargo}
+export GOMODCACHE=${GOMODCACHE:-$WORK_DIR/cache/go-mod}
+export GOCACHE=${GOCACHE:-$WORK_DIR/cache/go-build}
+export MACOSX_DEPLOYMENT_TARGET=$MACOS_MIN
+if [[ -n $MACOS_SDK ]]; then export SDKROOT=$MACOS_SDK; fi
+
+# ------------------------------------------------------------------ source --
+SOURCE='' REF='' URL='' NAME='' REPO='' LABEL='' COMMIT='' FETCH_REF='' LOCAL=0
+
+setup_git_auth() {
+  [[ -n ${GITHUB_TOKEN:-} && $URL == https://github.com/* ]] || return 0
+  # Passed via GIT_CONFIG_* so the token never shows up on a command line.
+  export GIT_CONFIG_COUNT=1
+  export GIT_CONFIG_KEY_0="http.https://github.com/.extraheader"
+  GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GITHUB_TOKEN" | base64 -w0)"
+  export GIT_CONFIG_VALUE_0
+}
+
+sanitize() { local s=${1//[^A-Za-z0-9._-]/-}; printf '%s' "${s#-}"; }
+
+resolve_source() {
+  SOURCE=$(normalize_source "$1")
+  REF=${2:-}
+
+  if [[ -d $SOURCE ]]; then
+    LOCAL=1
+    SOURCE=$(realpath "$SOURCE")
+    REPO=$(basename "$SOURCE")
+    NAME=$(sanitize "$REPO")
+    COMMIT=$(git -C "$SOURCE" rev-parse HEAD 2>/dev/null || true)
+    LABEL="local${COMMIT:+-${COMMIT:0:7}}"
+    FORCE=1 # local trees can change without a new commit
+    return
+  fi
+
+  URL=$SOURCE
+  local path=${URL%/}
+  path=${path%.git}
+  path=${path#*://*/}   # https://host/owner/repo -> owner/repo
+  path=${path#git@*:}   # git@host:owner/repo    -> owner/repo
+  REPO=${path##*/}
+  local owner=${path%/*}
+  owner=${owner##*/}
+  NAME=$(sanitize "${owner:+${owner}_}$REPO")
+  setup_git_auth
+
+  local out
+  if [[ -z $REF ]]; then
+    out=$(git ls-remote --symref "$URL" HEAD) || die "cannot reach $URL"
+    local branch
+    branch=$(awk '$1 == "ref:" { sub("refs/heads/", "", $2); print $2; exit }' <<<"$out")
+    COMMIT=$(awk '$1 != "ref:" && $2 == "HEAD" { print $1; exit }' <<<"$out")
+    [[ -n $COMMIT ]] || die "could not determine the default branch of $URL"
+    FETCH_REF=${branch:+refs/heads/$branch}
+    FETCH_REF=${FETCH_REF:-HEAD}
+    LABEL="${branch:-HEAD}-${COMMIT:0:7}"
+    return
+  fi
+
+  if [[ $REF == @latest-tag || $REF == latest-tag ]]; then
+    out=$(git ls-remote --tags --refs "$URL") || die "cannot reach $URL"
+    REF=$(awk '{ sub("refs/tags/", "", $2); print $2 }' <<<"$out" \
+          | grep -E -- "$TAG_PATTERN" | sort -V | tail -n1) || true
+    [[ -n $REF ]] || die "no tag in $URL matches TAG_PATTERN '$TAG_PATTERN'"
+    log "latest tag: $REF"
+  fi
+
+  if [[ $REF =~ ^[0-9a-fA-F]{7,40}$ ]]; then
+    COMMIT=$REF FETCH_REF=$REF LABEL=${REF:0:7}
+    (( ${#REF} == 40 )) || COMMIT=  # abbreviated SHA: resolved after fetching
+    return
+  fi
+
+  out=$(git ls-remote "$URL" "refs/tags/$REF" "refs/tags/$REF^{}" "refs/heads/$REF") \
+    || die "cannot reach $URL"
+  local tag_sha peeled head_sha
+  tag_sha=$(awk -v r="refs/tags/$REF" '$2 == r { print $1 }' <<<"$out")
+  peeled=$(awk -v r="refs/tags/$REF^{}" '$2 == r { print $1 }' <<<"$out")
+  head_sha=$(awk -v r="refs/heads/$REF" '$2 == r { print $1 }' <<<"$out")
+  if [[ -n $tag_sha ]]; then
+    COMMIT=${peeled:-$tag_sha} FETCH_REF="refs/tags/$REF" LABEL=$(sanitize "$REF")
+  elif [[ -n $head_sha ]]; then
+    COMMIT=$head_sha FETCH_REF="refs/heads/$REF" LABEL="$(sanitize "$REF")-${head_sha:0:7}"
+  else
+    die "ref '$REF' not found in $URL"
+  fi
+}
+
+fetch_source() {
+  rm -rf "$BUILD_ROOT"
+  mkdir -p "$BUILD_ROOT"
+  if (( LOCAL )); then
+    log "copying local source $SOURCE"
+    cp -a "$SOURCE" "$SRC"
+    return
+  fi
+
+  log "fetching $URL ($FETCH_REF)"
+  git init -q "$SRC"
+  git -C "$SRC" remote add origin "$URL"
+  if git -C "$SRC" fetch -q --depth 1 origin "$FETCH_REF" 2>/dev/null; then
+    git -C "$SRC" checkout -q --detach FETCH_HEAD
+  else
+    log "shallow fetch not possible, fetching full history"
+    git -C "$SRC" fetch -q --tags origin '+refs/heads/*:refs/remotes/origin/*'
+    git -C "$SRC" checkout -q --detach "$REF"
+  fi
+  COMMIT=$(git -C "$SRC" rev-parse HEAD)
+
+  if [[ -f $SRC/.gitmodules ]]; then
+    log "updating submodules"
+    git -C "$SRC" submodule update -q --init --recursive --depth 1 --jobs 4 2>/dev/null \
+      || git -C "$SRC" submodule update -q --init --recursive --jobs 4
+  fi
+}
+
+apply_patches() {
+  local dir=$CONFIG_DIR/patches/$NAME p
+  [[ -d $dir ]] || return 0
+  for p in "$dir"/*.patch "$dir"/*.diff; do
+    [[ -f $p ]] || continue
+    log "applying patch $(basename "$p")"
+    git -C "$SRC" apply --whitespace=nowarn "$p" || die "patch $p failed to apply"
+  done
+}
+
+detect_build_system() {
+  local d=$1
+  if   [[ -f $d/Cargo.toml ]];        then echo cargo
+  elif [[ -f $d/go.mod ]];            then echo go
+  elif [[ -f $d/CMakeLists.txt ]];    then echo cmake
+  elif [[ -f $d/meson.build ]];       then echo meson
+  elif [[ -f $d/configure || -f $d/configure.ac || -f $d/configure.in || -f $d/autogen.sh ]]; then echo autotools
+  elif [[ -f $d/Makefile || -f $d/makefile || -f $d/GNUmakefile ]]; then echo make
+  else echo none
+  fi
+}
+
+# --------------------------------------------------------------- toolchain --
+setup_toolchain() {
+  case $1 in
+    arm64|aarch64) A=arm64 HOST=aarch64-apple-darwin RUST_TARGET=aarch64-apple-darwin GOARCH_=arm64 CPU_FAMILY=aarch64 ;;
+    x86_64|x64|amd64) A=x86_64 HOST=x86_64-apple-darwin RUST_TARGET=x86_64-apple-darwin GOARCH_=amd64 CPU_FAMILY=x86_64 ;;
+    *) die "unsupported ARCH '$1' (use universal, arm64, x86_64, both or all)" ;;
+  esac
+  PLAT=macos-$A
+
+  command -v "$HOST-cc" >/dev/null || die "compiler $HOST-cc not found"
+  TOOLCHAIN_DESC="zig $(zig version) ($HOST, macOS $MACOS_MIN+${MACOS_SDK:+, SDK $(basename "$MACOS_SDK")})"
+
+  # Keep host (Linux) libraries out of reach: only the SDK, if any, is searched.
+  local root=${MACOS_SDK:-$BUILD_ROOT/sysroot}
+  mkdir -p "$BUILD_ROOT/sysroot"
+  export PKG_CONFIG_LIBDIR=$root/usr/lib/pkgconfig PKG_CONFIG_SYSROOT_DIR=$root
+
+  TC_DIR=$BUILD_ROOT/toolchain-$A
+  mkdir -p "$TC_DIR"
+  {
+    echo "set(CMAKE_SYSTEM_NAME Darwin)"
+    echo "set(CMAKE_SYSTEM_PROCESSOR $A)"
+    echo "set(CMAKE_C_COMPILER $HOST-cc)"
+    echo "set(CMAKE_CXX_COMPILER $HOST-c++)"
+    echo "set(CMAKE_AR $(command -v "$HOST-ar") CACHE FILEPATH \"\")"
+    echo "set(CMAKE_RANLIB $(command -v "$HOST-ranlib") CACHE FILEPATH \"\")"
+    echo "set(CMAKE_STRIP $(command -v "$HOST-strip") CACHE FILEPATH \"\")"
+    echo "set(CMAKE_INSTALL_NAME_TOOL $(command -v "$HOST-install_name_tool") CACHE FILEPATH \"\")"
+    echo "set(CMAKE_OTOOL $(command -v "$HOST-otool") CACHE FILEPATH \"\")"
+    echo "set(CMAKE_OSX_ARCHITECTURES \"\" CACHE STRING \"\")"
+    echo "set(CMAKE_FIND_ROOT_PATH $root)"
+    echo "set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)"
+    echo "set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)"
+    echo "set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)"
+    echo "set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)"
+  } >"$TC_DIR/toolchain.cmake"
+
+  cat >"$TC_DIR/cross.ini" <<EOF
+[binaries]
+c = '$HOST-cc'
+cpp = '$HOST-c++'
+ar = '$HOST-ar'
+strip = '$HOST-strip'
+pkg-config = 'pkg-config'
+
+[host_machine]
+system = 'darwin'
+subsystem = 'macos'
+kernel = 'xnu'
+cpu_family = '$CPU_FAMILY'
+cpu = '$A'
+endian = 'little'
+EOF
+}
+
+# Exports the classic cross-compilation variables (autotools / make / custom).
+cross_env() {
+  export HOST ARCH_NAME=$A
+  export CC=$HOST-cc CXX=$HOST-c++ AR=$HOST-ar RANLIB=$HOST-ranlib NM=$HOST-nm
+  export STRIP=$HOST-strip OBJDUMP=$HOST-objdump OTOOL=$HOST-otool LIPO=$HOST-lipo
+  export INSTALL_NAME_TOOL=$HOST-install_name_tool PKG_CONFIG=pkg-config
+  export CFLAGS=${CFLAGS:--O2} CXXFLAGS=${CXXFLAGS:--O2}
+  export LDFLAGS=${LDFLAGS:-}
+  export PREFIX=$STAGE CROSS_PREFIX=$HOST-
+}
+
+# ------------------------------------------------------------ build systems --
+build_cmake() {
+  local extra; split_words "$CMAKE_ARGS" extra
+  local gen=() opts=()
+  command -v ninja >/dev/null && gen=(-G Ninja)
+  (( STATIC )) && opts+=(-DBUILD_SHARED_LIBS=OFF)
+  cmake -S "$SRC_BUILD" -B "$BDIR" "${gen[@]}" \
+    -DCMAKE_TOOLCHAIN_FILE="$TC_DIR/toolchain.cmake" \
+    -DCMAKE_BUILD_TYPE="$BUILD_TYPE" \
+    -DCMAKE_INSTALL_PREFIX="$STAGE" \
+    -DBUILD_TESTING=OFF \
+    "${opts[@]}" "${extra[@]}"
+  cmake --build "$BDIR" --parallel "$JOBS"
+  cmake --install "$BDIR" || warn "cmake install failed; collecting binaries from the build tree"
+}
+
+build_meson() {
+  local extra; split_words "$MESON_ARGS" extra
+  local opts=() buildtype
+  (( STATIC )) && opts+=(-Ddefault_library=static -Dprefer_static=true)
+  case ${BUILD_TYPE,,} in
+    relwithdebinfo) buildtype=debugoptimized ;;
+    minsizerel) buildtype=minsize ;;
+    *) buildtype=${BUILD_TYPE,,} ;;
+  esac
+  meson setup "$BDIR" "$SRC_BUILD" --cross-file "$TC_DIR/cross.ini" \
+    --prefix "$STAGE" --buildtype "$buildtype" "${opts[@]}" "${extra[@]}"
+  meson compile -C "$BDIR" -j "$JOBS"
+  meson install -C "$BDIR" --no-rebuild || warn "meson install failed; collecting binaries from the build tree"
+}
+
+build_autotools() {
+  local extra; split_words "$CONFIGURE_ARGS" extra
+  local margs; split_words "$MAKE_ARGS" margs
+  (
+    cd "$SRC_BUILD"
+    if [[ ! -x configure ]]; then
+      if [[ -x autogen.sh ]]; then NOCONFIGURE=1 ./autogen.sh; else autoreconf -fi; fi
+    fi
+  )
+  (
+    cross_env
+    local opts=()
+    (( STATIC )) && opts+=(--enable-static --disable-shared)
+    mkdir -p "$BDIR" && cd "$BDIR"
+    "$SRC_BUILD/configure" --host="$HOST" --prefix="$STAGE" "${opts[@]}" "${extra[@]}"
+    make -j "$JOBS" "${margs[@]}"
+    make install "${margs[@]}" || warn "make install failed; collecting binaries from the build tree"
+  )
+}
+
+# Plain Makefiles build in-tree, so every architecture gets its own copy.
+build_make() {
+  local margs; split_words "$MAKE_ARGS" margs
+  cp -a "$SRC_BUILD" "$BDIR"
+  (
+    cross_env
+    cd "$BDIR"
+    make -j "$JOBS" CC="$CC" CXX="$CXX" AR="$AR" RANLIB="$RANLIB" "${margs[@]}"
+  )
+}
+
+build_custom() {
+  cp -a "$SRC_BUILD" "$BDIR"
+  (
+    cross_env
+    export MACBIN_ARCH=$A MACBIN_PLATFORM=$PLAT RUST_TARGET GOARCH_ STAGE OUT_DIR=$ARCH_OUT
+    cd "$BDIR"
+    bash -euo pipefail -c "$BUILD_CMD"
+  )
+}
+
+build_cargo() {
+  local extra; split_words "$CARGO_ARGS" extra
+  (
+    cd "$SRC_BUILD"
+    rustup target add "$RUST_TARGET" >/dev/null 2>&1 || true # honours rust-toolchain files
+    export CARGO_TARGET_DIR=$BDIR
+    # Header room for the code signature added later (zig only signs arm64).
+    cargo zigbuild --release --target "$RUST_TARGET" \
+      --config "target.$RUST_TARGET.rustflags=['-C', 'link-arg=-Wl,-headerpad_max_install_names']" \
+      "${extra[@]}"
+  )
+  local f
+  mkdir -p "$ARCH_OUT"
+  for f in "$BDIR/$RUST_TARGET/release"/*; do
+    if is_macho "$f"; then cp -a "$f" "$ARCH_OUT/"; fi
+  done
+}
+
+build_go() {
+  local extra; split_words "$GO_ARGS" extra
+  local pkgs; split_words "$GO_PACKAGES" pkgs
+  (
+    cd "$SRC_BUILD"
+    export GOOS=darwin GOARCH=$GOARCH_ CGO_ENABLED=$GO_CGO
+    if (( GO_CGO )); then export CC=$HOST-cc CXX=$HOST-c++; fi
+    if (( ${#pkgs[@]} == 0 )); then
+      mapfile -t pkgs < <(go list -f '{{if eq .Name "main"}}{{.Dir}}{{end}}' ./... 2>/dev/null \
+        | grep -Ev '/(_?examples?|testdata|tests?|internal/tools)(/|$)' \
+        | sed "s|^$PWD|.|")
+      (( ${#pkgs[@]} )) || pkgs=(./...)
+    fi
+    log "go packages: ${pkgs[*]}"
+    mkdir -p "$ARCH_OUT"
+    go build -trimpath -ldflags "-s -w $GO_LDFLAGS" "${extra[@]}" -o "$ARCH_OUT/" "${pkgs[@]}"
+  )
+}
+
+# --------------------------------------------------------------- packaging --
+# list_macho DIR - NUL-separated Mach-O executables/libraries under DIR.
+list_macho() {
+  local f
+  while IFS= read -r -d '' f; do
+    if is_macho "$f"; then printf '%s\0' "$f"; fi
+  done < <(find "$1" \( -name CMakeFiles -o -name .git -o -name '*.p' -o -name '*.dSYM' \
+             -o -name deps -o -name build -o -name incremental \) -prune -o \
+             -type f ! -name '*.o' ! -name '*.a' -print0 2>/dev/null)
+}
+
+has_binaries() {
+  local f
+  while IFS= read -r -d '' f; do return 0; done < <(list_macho "$1")
+  return 1
+}
+
+copy_binaries_flat() {
+  local from=$1 f
+  mkdir -p "$ARCH_OUT"
+  while IFS= read -r -d '' f; do
+    cp -a "$f" "$ARCH_OUT/"
+  done < <(list_macho "$from")
+}
+
+collect() {
+  if [[ -n $ARTIFACTS ]]; then
+    local base=$SRC_BUILD pat f
+    [[ -d $BDIR ]] && base=$BDIR
+    mkdir -p "$ARCH_OUT"
+    for pat in $ARTIFACTS; do
+      for f in "$base"/$pat "$STAGE"/$pat; do
+        if [[ -e $f ]]; then cp -a "$f" "$ARCH_OUT/"; fi
+      done
+    done
+    has_binaries "$ARCH_OUT" || warn "ARTIFACTS matched no Mach-O files"
+    return 0
+  fi
+
+  case $SYSTEM in
+    cargo|go) ;; # already placed in $ARCH_OUT
+    *)
+      if has_binaries "$STAGE"; then
+        mkdir -p "$ARCH_OUT"
+        cp -a "$STAGE"/. "$ARCH_OUT"/
+        # Drop development files - only runtime pieces are useful on a Mac.
+        rm -rf "$ARCH_OUT"/include "$ARCH_OUT"/lib/pkgconfig "$ARCH_OUT"/lib/cmake \
+               "$ARCH_OUT"/share/pkgconfig "$ARCH_OUT"/share/aclocal "$ARCH_OUT"/share/info
+        find "$ARCH_OUT" -type f \( -name '*.a' -o -name '*.la' \) -delete
+        find "$ARCH_OUT" -depth -type d -empty -delete
+      else
+        copy_binaries_flat "$BDIR"
+      fi
+      ;;
+  esac
+  has_binaries "$ARCH_OUT" || die "build finished but no Mach-O files were found (set ARTIFACTS to point at them)"
+}
+
+copy_docs() {
+  local f
+  for f in "$SRC"/LICENSE* "$SRC"/LICENCE* "$SRC"/COPYING* "$SRC"/README*; do
+    if [[ -f $f ]]; then cp -a "$f" "$ARCH_OUT/"; fi
+  done
+}
+
+# load_commands FILE - the dylibs FILE links against, one per line.
+load_commands() {
+  "$HOST-otool" -l "$1" 2>/dev/null | awk '
+    $1 == "cmd" { want = ($2 ~ /^LC_(LOAD|LOAD_WEAK|REEXPORT|LAZY_LOAD|LOAD_UPWARD)_DYLIB$/) }
+    want && $1 == "name" { sub(/^[ \t]*name /, ""); sub(/ \(offset [0-9]+\)$/, ""); print; want = 0 }'
+}
+
+# rpaths FILE - the LC_RPATH entries of FILE, one per line.
+rpaths() {
+  "$HOST-otool" -l "$1" 2>/dev/null | awk '
+    $1 == "cmd" { want = ($2 == "LC_RPATH") }
+    want && $1 == "path" { sub(/^[ \t]*path /, ""); sub(/ \(offset [0-9]+\)$/, ""); print; want = 0 }'
+}
+
+# Points every non-system dylib a binary uses at a copy inside the output
+# (@loader_path/...), copying the project's own dylibs in when needed, and
+# drops rpaths that point into the build machine.
+bundle_dylibs() {
+  local search=() queue=() f dep base dir found rel rp
+  local -A seen=() missing=()
+  search=("$STAGE/lib" "$STAGE/bin")
+  [[ -d $BDIR ]] && while IFS= read -r -d '' dir; do search+=("$dir"); done \
+    < <(find "$BDIR" -type f -name '*.dylib' -printf '%h\0' 2>/dev/null | sort -zu)
+
+  mapfile -d '' queue < <(list_macho "$ARCH_OUT")
+  while (( ${#queue[@]} )); do
+    f=${queue[0]}; queue=("${queue[@]:1}")
+    [[ -n ${seen[$f]:-} ]] && continue
+    seen[$f]=1
+    dir=$(dirname "$f")
+    while IFS= read -r dep; do
+      case $dep in /usr/lib/*|/System/*|@loader_path/*|@executable_path/*) continue ;; esac
+      base=${dep##*/}
+      found=$(find "$dir" -maxdepth 1 -name "$base" -print -quit)
+      [[ -n $found ]] || found=$(find "$ARCH_OUT" -name "$base" ! -type d -print -quit)
+      if [[ -z $found ]]; then
+        for rp in "${search[@]}"; do
+          [[ -d $rp && -f $rp/$base ]] || continue
+          log "bundling $base -> ${dir#"$ARCH_OUT"}/"
+          cp -L "$rp/$base" "$dir/$base"
+          found=$dir/$base
+          queue+=("$found")
+          break
+        done
+      fi
+      if [[ -z $found ]]; then missing[$dep]=1; continue; fi
+      rel=$(realpath -s --relative-to="$dir" "$found")
+      "$HOST-install_name_tool" -change "$dep" "@loader_path/$rel" "$f"
+    done < <(load_commands "$f")
+
+    while IFS= read -r rp; do
+      case $rp in @*) continue ;; esac
+      "$HOST-install_name_tool" -delete_rpath "$rp" "$f" 2>/dev/null || true
+    done < <(rpaths "$f")
+    if [[ $f == *.dylib ]]; then
+      "$HOST-install_name_tool" -id "@rpath/$(basename "$f")" "$f" 2>/dev/null || true
+    fi
+  done
+  if (( ${#missing[@]} )); then
+    warn "not bundled, must be installed on the Mac: $(printf '%s\n' "${!missing[@]}" | sort | tr '\n' ' ')"
+  fi
+}
+
+strip_binaries() {
+  local f
+  while IFS= read -r -d '' f; do
+    "$HOST-strip" -S -x "$f" 2>/dev/null || warn "could not strip ${f#"$ARCH_OUT"/}"
+  done < <(list_macho "$1")
+}
+
+# Apple Silicon only runs signed code, so everything is at least ad-hoc signed.
+# Signing comes last: any later change to a binary invalidates its signature.
+sign_binaries() {
+  local dir=$1 f args=()
+  case $CODESIGN in
+    none) return 0 ;;
+    adhoc) ;;
+    developer-id)
+      [[ -f $SIGN_P12 ]] || die "CODESIGN=developer-id needs SIGN_P12 (a .p12 file)"
+      # Hardened runtime + secure timestamp, as notarization requires;
+      # --for-notarization also checks that it is an Apple Developer ID certificate.
+      args=(--p12-file "$SIGN_P12" --code-signature-flags runtime)
+      if [[ -n $NOTARY_API_KEY ]]; then args+=(--for-notarization); fi
+      if [[ -n $SIGN_TIMESTAMP_URL ]]; then args+=(--timestamp-url "$SIGN_TIMESTAMP_URL"); fi
+      if [[ -n $SIGN_P12_PASSWORD ]]; then args+=(--p12-password "$SIGN_P12_PASSWORD"); fi
+      ;;
+    *) die "unknown CODESIGN '$CODESIGN' (use adhoc, developer-id or none)" ;;
+  esac
+  while IFS= read -r -d '' f; do
+    rcodesign sign "${args[@]}" "$f" >/dev/null 2>"$BUILD_ROOT/sign.log" \
+      || { cat "$BUILD_ROOT/sign.log" >&2; die "signing ${f#"$dir"/} failed"; }
+  done < <(list_macho "$dir")
+}
+
+# Combines the arm64 and x86_64 outputs into one with fat Mach-O files.
+make_universal() {
+  local arm=$1 x86=$2 out=$3 f rel
+  rm -rf "$out"
+  mkdir -p "$out"
+  cp -a "$x86"/. "$out"/
+  cp -a "$arm"/. "$out"/
+  while IFS= read -r -d '' f; do
+    rel=${f#"$arm"/}
+    if is_macho "$x86/$rel"; then
+      lipo -create "$f" "$x86/$rel" -output "$out/$rel"
+    else
+      warn "$rel has no x86_64 counterpart; the universal output carries arm64 only"
+    fi
+  done < <(list_macho "$arm")
+}
+
+write_buildinfo() {
+  local dir=$1 arch=$2 signing=$CODESIGN
+  [[ $signing == developer-id ]] && signing+=" ($(basename "$SIGN_P12"))"
+  {
+    echo "source:     ${URL:-$SOURCE}"
+    echo "ref:        ${REF:-${FETCH_REF:-local}}"
+    echo "commit:     ${COMMIT:-n/a}"
+    echo "arch:       $arch"
+    echo "macos-min:  $MACOS_MIN"
+    echo "system:     $SYSTEM"
+    echo "toolchain:  $TOOLCHAIN_DESC"
+    echo "codesign:   $signing"
+    echo "built:      $(date -u +%Y-%m-%dT%H:%M:%SZ) by MacBin $MACBIN_VERSION"
+  } >"$dir/BUILDINFO.txt"
+}
+
+# package DIR PLATFORM - zip (and notarize) one output folder.
+package() {
+  local dir=$1 plat=$2 zip
+  (( ZIP )) || return 0
+  zip=$PARTIAL/$REPO-$LABEL-$plat.zip
+  (cd "$dir" && zip -q -r -9 -y "$zip" .)
+  if [[ -n $NOTARY_API_KEY ]]; then
+    [[ $CODESIGN == developer-id ]] || die "notarization needs a Developer ID signature (SIGN_P12)"
+    log "[$plat] notarizing $(basename "$zip")"
+    rcodesign notary-submit --api-key-file "$NOTARY_API_KEY" --wait "$zip" \
+      || die "[$plat] notarization failed"
+  fi
+}
+
+config_hash() {
+  local v
+  for v in ARCH MACOS_MIN MACOS_SDK BUILD_SYSTEM BUILD_CMD BUILD_TYPE SUBDIR STATIC CMAKE_ARGS \
+           MESON_ARGS CONFIGURE_ARGS MAKE_ARGS CARGO_ARGS GO_PACKAGES GO_ARGS GO_LDFLAGS GO_CGO \
+           ARTIFACTS PRE_BUILD_CMD BUNDLE_DYLIBS STRIP_BINARIES CODESIGN ZIP MACBIN_VERSION; do
+    printf '%s=%s\n' "$v" "${!v}"
+  done
+  printf 'NOTARIZE=%s\n' "${NOTARY_API_KEY:+1}"
+}
+
+# -------------------------------------------------------------------- main --
+main() {
+  case ${1:-} in -h|--help|help) usage; exit 0 ;; esac
+  local src=${1:-}
+  [[ -n $src ]] || { usage; exit 2; }
+
+  resolve_source "$src" "${2:-}"
+  [[ -n $OUTPUT_NAME ]] && NAME=$(sanitize "$OUTPUT_NAME")
+  [[ -n $OUTPUT_LABEL ]] && LABEL=$(sanitize "$OUTPUT_LABEL")
+
+  # archs: what gets built; keep: which per-arch outputs are delivered.
+  local archs=() keep=() universal=0 a
+  case ${ARCH,,} in
+    universal|fat) archs=(arm64 x86_64) universal=1 ;;
+    all) archs=(arm64 x86_64) keep=(arm64 x86_64) universal=1 ;;
+    both) archs=(arm64 x86_64) keep=(arm64 x86_64) ;;
+    *) read -ra archs <<<"${ARCH//,/ }"; keep=("${archs[@]}") ;;
+  esac
+
+  DEST=$OUTPUT_DIR/$NAME/$LABEL
+  local marker=$DEST/.macbin cfg
+  cfg=$(config_hash | sha256sum | cut -c1-16)
+  if (( ! FORCE )) && [[ -n $COMMIT && -f $marker ]] \
+     && grep -qx "commit=$COMMIT" "$marker" && grep -qx "config=$cfg" "$marker"; then
+    ok "$NAME $LABEL is up to date (FORCE=1 to rebuild)"
+    printf '%s\n' "$NAME/$LABEL" >"$OUTPUT_DIR/.macbin-last"
+    return 0
+  fi
+
+  mkdir -p "$OUTPUT_DIR/_logs"
+  exec > >(tee "$OUTPUT_DIR/_logs/$NAME.log") 2>&1
+
+  log "MacBin $MACBIN_VERSION: building $NAME @ $LABEL for ${ARCH,,} (macOS $MACOS_MIN+)"
+  BUILD_ROOT=$WORK_DIR/builds/$NAME
+  SRC=$BUILD_ROOT/src
+  fetch_source
+  apply_patches
+  SRC_BUILD=$SRC${SUBDIR:+/$SUBDIR}
+  [[ -d $SRC_BUILD ]] || die "SUBDIR '$SUBDIR' does not exist"
+
+  if [[ -n $PRE_BUILD_CMD ]]; then
+    log "running PRE_BUILD_CMD"
+    (cd "$SRC_BUILD" && bash -euo pipefail -c "$PRE_BUILD_CMD")
+  fi
+
+  SYSTEM=$BUILD_SYSTEM
+  [[ $SYSTEM == auto ]] && SYSTEM=$(detect_build_system "$SRC_BUILD")
+  [[ $SYSTEM == none ]] && die "could not detect a build system; set BUILD_SYSTEM or BUILD_CMD"
+  declare -F "build_$SYSTEM" >/dev/null || die "unknown BUILD_SYSTEM '$SYSTEM'"
+  log "build system: $SYSTEM"
+
+  PARTIAL=$OUTPUT_DIR/$NAME/.$LABEL.partial
+  rm -rf "$PARTIAL"
+  mkdir -p "$PARTIAL"
+  local work=$BUILD_ROOT/out
+
+  for a in "${archs[@]}"; do
+    setup_toolchain "$a"
+    [[ -n ${MACBIN_NO_GROUPS:-} ]] || group "MacBin: $NAME $LABEL ($PLAT)"
+    log "[$PLAT] toolchain: $TOOLCHAIN_DESC"
+    STAGE=$BUILD_ROOT/stage-$A BDIR=$BUILD_ROOT/build-$A ARCH_OUT=$work/$PLAT
+    rm -rf "$STAGE" "$BDIR" "$ARCH_OUT"
+    "build_$SYSTEM"
+    collect
+    copy_docs
+    (( BUNDLE_DYLIBS )) && bundle_dylibs
+    (( STRIP_BINARIES )) && strip_binaries "$ARCH_OUT"
+    sign_binaries "$ARCH_OUT"
+    write_buildinfo "$ARCH_OUT" "$A"
+    ok "[$PLAT] built: $(list_macho "$ARCH_OUT" | tr '\0' '\n' | sed "s|^$ARCH_OUT/||" | tr '\n' ' ')"
+    [[ -n ${MACBIN_NO_GROUPS:-} ]] || endgroup
+  done
+
+  if (( universal )); then
+    log "[macos-universal] combining arm64 and x86_64 with lipo"
+    make_universal "$work/macos-arm64" "$work/macos-x86_64" "$work/macos-universal"
+    sign_binaries "$work/macos-universal"
+    TOOLCHAIN_DESC="zig $(zig version) (macOS $MACOS_MIN+${MACOS_SDK:+, SDK $(basename "$MACOS_SDK")}), combined with lipo"
+    write_buildinfo "$work/macos-universal" "universal (arm64 + x86_64)"
+    keep+=(universal)
+  fi
+
+  for a in "${keep[@]}"; do
+    a=${a/aarch64/arm64}; a=${a/amd64/x86_64}; a=${a/x64/x86_64}
+    mv "$work/macos-$a" "$PARTIAL/macos-$a"
+    package "$PARTIAL/macos-$a" "macos-$a"
+  done
+
+  printf 'commit=%s\nconfig=%s\n' "${COMMIT:-}" "$cfg" >"$PARTIAL/.macbin"
+  rm -rf "$DEST"
+  mv "$PARTIAL" "$DEST"
+  cp "$OUTPUT_DIR/_logs/$NAME.log" "$DEST/build.log" 2>/dev/null || true
+  (( KEEP_WORK )) || rm -rf "$BUILD_ROOT"
+  printf '%s\n' "$NAME/$LABEL" >"$OUTPUT_DIR/.macbin-last"
+  ok "output: $DEST"
+}
+
+main "$@"

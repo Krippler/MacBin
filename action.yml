@@ -1,0 +1,120 @@
+name: MacBin - build macOS binaries
+description: Cross-compile a project into macOS binaries on a CI Runner Farm runner that uses the MacBin runner image
+author: Krippler
+branding:
+  icon: package
+  color: blue
+
+inputs:
+  source:
+    description: What to build - "." for the checked-out workspace, a path, owner/repo or a git URL
+    default: "."
+  ref:
+    description: Branch, tag, commit or @latest-tag when source is a repository
+    default: ""
+  arch:
+    description: universal (one arm64+x86_64 binary), arm64, x86_64, both (separate) or all
+    default: universal
+  macos-min:
+    description: Minimum macOS version
+    default: "11.0"
+  build-system:
+    description: auto, cmake, meson, autotools, make, cargo, go or custom
+    default: auto
+  build-cmd:
+    description: Custom build command (implies build-system custom)
+    default: ""
+  subdir:
+    description: Build from this subdirectory
+    default: ""
+  static:
+    description: "true to prefer static libraries over .dylibs"
+    default: "false"
+  cmake-args:
+    description: Extra CMake arguments
+    default: ""
+  meson-args:
+    description: Extra Meson arguments
+    default: ""
+  configure-args:
+    description: Extra ./configure arguments
+    default: ""
+  make-args:
+    description: Extra make arguments
+    default: ""
+  cargo-args:
+    description: Extra cargo build arguments
+    default: ""
+  go-packages:
+    description: Go packages to build (default every main package)
+    default: ""
+  artifacts:
+    description: Globs of files to collect instead of automatic detection
+    default: ""
+  env:
+    description: Further MacBin settings, one KEY=VALUE per line
+    default: ""
+  output-dir:
+    description: Where results are written (default <runner temp>/macbin/output)
+    default: ""
+  name:
+    description: Output folder name (default the repository name)
+    default: ""
+  label:
+    description: Output version label (default the tag name, or branch-shortsha)
+    default: ""
+  token:
+    description: Token used to clone private repositories when source is a repository
+    default: ""
+  codesign:
+    description: adhoc, none, or developer-id (default adhoc, or developer-id when a certificate is given)
+    default: ""
+  sign-p12-base64:
+    description: Developer ID Application certificate (.p12), base64-encoded - pass a secret
+    default: ""
+  sign-p12-password:
+    description: Password of the .p12 - pass a secret
+    default: ""
+  notary-api-key:
+    description: App Store Connect API key JSON from "rcodesign encode-app-store-connect-api-key" - pass a secret; notarizes the zips
+    default: ""
+
+outputs:
+  output-dir:
+    description: Folder with the results (<output-dir>/<name>/<label>)
+    value: ${{ steps.build.outputs.output-dir }}
+  zips:
+    description: Newline-separated list of the produced zip files
+    value: ${{ steps.build.outputs.zips }}
+
+runs:
+  using: composite
+  steps:
+    - id: build
+      shell: bash
+      run: '"$GITHUB_ACTION_PATH/action/run.sh"'
+      env:
+        IN_SOURCE: ${{ inputs.source }}
+        IN_REF: ${{ inputs.ref }}
+        IN_ENV: ${{ inputs.env }}
+        IN_OUTPUT_DIR: ${{ inputs.output-dir }}
+        IN_NAME: ${{ inputs.name }}
+        IN_LABEL: ${{ inputs.label }}
+        IN_TOKEN: ${{ inputs.token }}
+        IN_STATIC: ${{ inputs.static }}
+        IN_SIGN_P12_BASE64: ${{ inputs.sign-p12-base64 }}
+        IN_SIGN_P12_PASSWORD: ${{ inputs.sign-p12-password }}
+        IN_NOTARY_API_KEY: ${{ inputs.notary-api-key }}
+        CODESIGN: ${{ inputs.codesign }}
+        ARCH: ${{ inputs.arch }}
+        MACOS_MIN: ${{ inputs.macos-min }}
+        BUILD_SYSTEM: ${{ inputs.build-system }}
+        BUILD_CMD: ${{ inputs.build-cmd }}
+        SUBDIR: ${{ inputs.subdir }}
+        CMAKE_ARGS: ${{ inputs.cmake-args }}
+        MESON_ARGS: ${{ inputs.meson-args }}
+        CONFIGURE_ARGS: ${{ inputs.configure-args }}
+        MAKE_ARGS: ${{ inputs.make-args }}
+        CARGO_ARGS: ${{ inputs.cargo-args }}
+        GO_PACKAGES: ${{ inputs.go-packages }}
+        ARTIFACTS: ${{ inputs.artifacts }}

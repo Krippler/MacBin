@@ -1,0 +1,127 @@
+name: Image
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: image-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Free disk space
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+
+      - name: Lint scripts
+        run: shellcheck -x -P lib scripts/* lib/common.sh tests/*.sh action/run.sh runner/*.sh docker/*.sh docker/macbin-tool apple/*.sh
+
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Build runner base
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          load: true
+          tags: macbin:runner-base
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # The farm image applies CI Runner Farm's own starter Dockerfile on top of
+      # the runner base. The default builder sees the image loaded above.
+      - name: Build farm runner image
+        env:
+          BUILDX_BUILDER: default
+        run: BASE_IMAGE=macbin:runner-base runner/build-farm-image.sh macbin:runner
+
+      - name: Test
+        run: tests/run-runner-tests.sh macbin:runner "$RUNNER_TEMP/test-zips"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: test-zips
+          path: ${{ runner.temp }}/test-zips/*.zip
+          if-no-files-found: error
+
+  # The cross-compiled test binaries have to run on a real Mac.
+  run-on-mac:
+    needs: build
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v7
+        with:
+          name: test-zips
+          path: test-zips
+      - name: Run the binaries
+        run: tests/run-on-mac.sh test-zips
+
+  # Publishing rebuilds from the build cache, once the binaries ran on a Mac.
+  publish:
+    needs: [build, run-on-mac]
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Free disk space
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Build runner base
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          load: true
+          tags: macbin:runner-base
+          cache-from: type=gha
+
+      - name: Build farm runner image
+        env:
+          BUILDX_BUILDER: default
+        run: BASE_IMAGE=macbin:runner-base runner/build-farm-image.sh macbin:runner
+
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # main       -> :runner-base, :runner, plus :runner-base-X.Y.Z and :runner-X.Y.Z
+      #               for MACBIN_VERSION in lib/common.sh the first time that
+      #               version reaches main (published versions are never overwritten)
+      # tag vX.Y.Z -> :runner-base-X.Y.Z, :runner-X.Y.Z
+      - name: Push
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          push() {
+            for name in runner-base runner; do
+              docker tag "macbin:$name" "$image:$name$1"
+              docker push -q "$image:$name$1"
+            done
+          }
+          if [[ $GITHUB_REF == "refs/heads/$DEFAULT_BRANCH" ]]; then
+            push ""
+            version=$(sed -n 's/^MACBIN_VERSION="\(.*\)"$/\1/p' lib/common.sh)
+            [[ -n $version ]] || { echo "::error::MACBIN_VERSION not found in lib/common.sh"; exit 1; }
+            if docker manifest inspect "$image:runner-base-$version" >/dev/null 2>&1; then
+              echo "runner-base-$version is already published; bump MACBIN_VERSION to release a new version"
+            else
+              push "-$version"
+            fi
+          fi
+          if [[ $GITHUB_REF_TYPE == tag ]]; then push "-${GITHUB_REF_NAME#v}"; fi
