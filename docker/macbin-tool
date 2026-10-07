@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+# macbin-tool - the cross tools MacBin puts on PATH, dispatched on the name it
+# is called as (see docker/install-toolchain.sh for the links):
+#
+#   <triple>-cc / -gcc / -clang        zig cc  for that macOS target
+#   <triple>-c++ / -g++ / -clang++     zig c++ for that macOS target
+#   <triple>-ar, -ranlib, -nm, -strip, -otool, -lipo, -objdump,
+#   -install_name_tool, -dsymutil      the LLVM Mach-O tools
+#   lipo, otool, install_name_tool     unprefixed, as macOS build scripts expect
+#
+# <triple> is aarch64-apple-darwin, arm64-apple-darwin or x86_64-apple-darwin.
+#   MACOS_MIN  minimum macOS version to target (default 11.0)
+#   MACOS_SDK  path to a MacOSX.sdk, for projects that link Apple frameworks
+set -euo pipefail
+
+name=${0##*/}
+llvm=${MACBIN_LLVM_BIN:-/usr/lib/llvm-18/bin}
+
+case $name in
+  *-apple-darwin-*) triple=${name%-*} tool=${name##*-apple-darwin-} ;;
+  *) triple='' tool=$name ;;
+esac
+
+case $tool in
+  ar|ranlib|nm|strip|otool|lipo|objdump) exec "$llvm/llvm-$tool" "$@" ;;
+  install_name_tool) exec "$llvm/llvm-install-name-tool" "$@" ;;
+  dsymutil) exec "$llvm/dsymutil" "$@" ;;
+  cc|gcc|clang) mode=cc ;;
+  c++|g++|clang++) mode=c++ ;;
+  *) echo "macbin-tool: unknown tool '$name'" >&2; exit 2 ;;
+esac
+
+case $triple in
+  aarch64-apple-darwin|arm64-apple-darwin) target=aarch64 ;;
+  x86_64-apple-darwin) target=x86_64 ;;
+  *) echo "macbin-tool: unknown target '$triple'" >&2; exit 2 ;;
+esac
+
+# zig picks the target from -target; drop the Apple-clang ways of saying the
+# same thing so projects that hardcode them still build.
+args=()
+while (( $# )); do
+  case $1 in
+    -arch|-isysroot) shift 2 || shift ;;
+    -mmacosx-version-min=*|-mmacos-version-min=*) shift ;;
+    *) args+=("$1"); shift ;;
+  esac
+done
+
+# Meson recognizes linkers by their version banner and doesn't know zig's
+# ("zig ld"), so answer its probes the way Apple's ld64 does.
+for a in "${args[@]}"; do
+  case $a in
+    -Wl,--version) echo "ld: unknown option: --version" >&2; exit 1 ;;
+    -Wl,-v) echo "@(#)PROGRAM:ld  PROJECT:ld64-1115.7.3 (zig $(zig version))" >&2; exit 0 ;;
+  esac
+done
+
+# Room in the header for install_name_tool to rewrite dylib paths later, as
+# Apple's linker gets from Xcode builds. Only when linking.
+link=('-Wl,-headerpad_max_install_names')
+for a in "${args[@]}"; do
+  case $a in -c|-S|-E|-M|-MM) link=(); break ;; esac
+done
+
+sdk=()
+if [[ -n ${MACOS_SDK:-} ]]; then
+  sdk=(--sysroot "$MACOS_SDK" -isystem "$MACOS_SDK/usr/include" -L"$MACOS_SDK/usr/lib"
+       -F"$MACOS_SDK/System/Library/Frameworks")
+fi
+
+exec zig "$mode" -target "$target-macos.${MACOS_MIN:-11.0}" "${sdk[@]}" "${args[@]}" "${link[@]}"

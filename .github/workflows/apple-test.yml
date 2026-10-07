@@ -1,0 +1,64 @@
+# Tests apple/build.sh (the build-apple.yml workflow) on GitHub's macOS runner
+# with unsigned builds of the fixtures in tests/apple.
+name: Apple test
+
+on:
+  push:
+    branches: [main]
+    paths: [apple/**, tests/apple/**, .github/workflows/apple-test.yml, .github/workflows/build-apple.yml]
+  pull_request:
+    paths: [apple/**, tests/apple/**, .github/workflows/apple-test.yml, .github/workflows/build-apple.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: ios-app, platform: ios, project: tests/apple/hello-app, expect: "*-ios-unsigned.ipa" }
+          - { name: macos-app, platform: macos, project: tests/apple/hello-app, expect: "*-macos.zip" }
+          - { name: swift-package, platform: macos, project: tests/apple/hello-swift, expect: "*-macos.zip" }
+    name: ${{ matrix.name }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Generate the Xcode project
+        if: matrix.name != 'swift-package'
+        working-directory: tests/apple/hello-app
+        run: brew install xcodegen && xcodegen generate
+
+      - id: build
+        env:
+          PLATFORM: ${{ matrix.platform }}
+          PROJECT: ${{ matrix.project }}
+          NAME: hello
+          LABEL: test
+          OUTPUT_DIR: ${{ runner.temp }}/out
+        run: apple/build.sh
+
+      - name: Check the output
+        env:
+          OUT: ${{ steps.build.outputs.output-dir }}
+          EXPECT: ${{ matrix.expect }}
+        run: |
+          ls -l "$OUT"
+          f=$(find "$OUT" -name "$EXPECT" | head -n1)
+          [[ -n $f ]] || { echo "::error::no $EXPECT in the output"; exit 1; }
+          x=$RUNNER_TEMP/x
+          rm -rf "$x" && mkdir "$x" && ditto -x -k "$f" "$x"
+          case ${{ matrix.name }} in
+            ios-app)
+              file "$x/Payload/HelloApp.app/HelloApp" | grep -q 'Mach-O 64-bit executable arm64' ;;
+            macos-app)
+              codesign --verify --deep --strict --verbose "$x/HelloApp.app"
+              file "$x/HelloApp.app/Contents/MacOS/HelloApp" ;;
+            swift-package)
+              codesign --verify --verbose "$x/hello-swift"
+              archs=$(lipo -archs "$x/hello-swift"); [[ $archs == *arm64* && $archs == *x86_64* ]]
+              "$x/hello-swift" | grep -q 'hello from swift' ;;
+          esac

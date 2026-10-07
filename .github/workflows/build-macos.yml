@@ -1,0 +1,123 @@
+# Reusable workflow: build macOS binaries for the calling repository on a
+# CI Runner Farm runner whose Dockerfile.github starts with
+#   FROM ghcr.io/krippler/macbin:runner-base-<version>
+#
+#   jobs:
+#     macos:
+#       uses: Krippler/MacBin/.github/workflows/build-macos.yml@main
+#       permissions:
+#         contents: write        # only needed to attach zips to releases
+#       with:
+#         arch: universal
+name: Build macOS binaries
+
+on:
+  workflow_call:
+    inputs:
+      runs-on:
+        description: JSON runner labels (default any self-hosted runner)
+        type: string
+        default: '["self-hosted"]'
+      arch:
+        description: universal, arm64, x86_64, both or all
+        type: string
+        default: universal
+      macos-min:
+        type: string
+        default: "11.0"
+      build-system:
+        type: string
+        default: auto
+      build-cmd:
+        type: string
+        default: ""
+      subdir:
+        type: string
+        default: ""
+      static:
+        type: boolean
+        default: false
+      cmake-args:
+        type: string
+        default: ""
+      meson-args:
+        type: string
+        default: ""
+      configure-args:
+        type: string
+        default: ""
+      cargo-args:
+        type: string
+        default: ""
+      artifacts:
+        type: string
+        default: ""
+      env:
+        description: Further MacBin settings, one KEY=VALUE per line
+        type: string
+        default: ""
+      codesign:
+        description: adhoc, none or developer-id (default adhoc, developer-id when MACOS_CERTIFICATE is set)
+        type: string
+        default: ""
+      artifact-name:
+        type: string
+        default: macos-binaries
+      release:
+        description: Attach the zips to the GitHub release when run for a tag
+        type: boolean
+        default: true
+    secrets:
+      MACOS_CERTIFICATE:
+        description: Developer ID Application certificate (.p12), base64-encoded
+        required: false
+      MACOS_CERTIFICATE_PASSWORD:
+        required: false
+      NOTARY_API_KEY:
+        description: App Store Connect API key JSON (rcodesign encode-app-store-connect-api-key)
+        required: false
+    outputs:
+      output-dir:
+        value: ${{ jobs.macos.outputs.output-dir }}
+
+jobs:
+  macos:
+    runs-on: ${{ fromJSON(inputs.runs-on) }}
+    outputs:
+      output-dir: ${{ steps.macbin.outputs.output-dir }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      - id: macbin
+        uses: Krippler/MacBin@main
+        with:
+          arch: ${{ inputs.arch }}
+          macos-min: ${{ inputs.macos-min }}
+          build-system: ${{ inputs.build-system }}
+          build-cmd: ${{ inputs.build-cmd }}
+          subdir: ${{ inputs.subdir }}
+          static: ${{ inputs.static }}
+          cmake-args: ${{ inputs.cmake-args }}
+          meson-args: ${{ inputs.meson-args }}
+          configure-args: ${{ inputs.configure-args }}
+          cargo-args: ${{ inputs.cargo-args }}
+          artifacts: ${{ inputs.artifacts }}
+          env: ${{ inputs.env }}
+          codesign: ${{ inputs.codesign }}
+          sign-p12-base64: ${{ secrets.MACOS_CERTIFICATE }}
+          sign-p12-password: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          notary-api-key: ${{ secrets.NOTARY_API_KEY }}
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ inputs.artifact-name }}
+          path: ${{ steps.macbin.outputs.zips }}
+          if-no-files-found: error
+
+      - name: Attach to release
+        if: inputs.release && github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v3
+        with:
+          files: ${{ steps.macbin.outputs.zips }}

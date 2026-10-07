@@ -1,0 +1,71 @@
+# Builds every repository in farm/repos.txt on a CI Runner Farm runner whose
+# Dockerfile.github starts FROM ghcr.io/krippler/macbin:runner-base-<version>.
+#
+# Enable it by setting the repository variable MACBIN_FARM=true. Optional:
+#   MACBIN_OUTPUT_DIR  persistent output folder, e.g. /mnt/macbin when the farm
+#                      has USER_SHARE_MOUNTS="/mnt/user/macbin:/mnt/macbin:rw".
+#                      Unchanged commits are then skipped on every run. Without
+#                      it the results are uploaded as a workflow artifact.
+#   MACBIN_RUNS_ON     JSON runner labels (default ["self-hosted"])
+#   MACBIN_UMASK       umask for the results (default 000, Unraid convention)
+# Secret MACBIN_GITHUB_TOKEN: token for private repositories in the list.
+name: Farm build
+
+on:
+  schedule:
+    - cron: "47 3 * * *"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Rebuild even if already built
+        type: boolean
+        default: false
+  push:
+    branches: [main]
+    paths: [farm/**]
+
+concurrency:
+  group: farm-build
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    if: vars.MACBIN_FARM == 'true'
+    runs-on: ${{ fromJSON(vars.MACBIN_RUNS_ON || '["self-hosted"]') }}
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Prepare
+        env:
+          SHARE_DIR: ${{ vars.MACBIN_OUTPUT_DIR }}
+        run: |
+          command -v macbin-batch >/dev/null || {
+            echo "::error::This runner has no MacBin toolchain - start its Dockerfile.github FROM ghcr.io/krippler/macbin:runner-base-<version> (see README)"
+            exit 1
+          }
+          {
+            echo "OUTPUT_DIR=${SHARE_DIR:-$RUNNER_TEMP/macbin-output}"
+            echo "WORK_DIR=$RUNNER_TEMP/macbin-work"
+            echo "CONFIG_DIR=$GITHUB_WORKSPACE/farm"
+          } >>"$GITHUB_ENV"
+
+      - name: Build
+        env:
+          FORCE: ${{ inputs.force && '1' || '0' }}
+          UMASK: ${{ vars.MACBIN_UMASK || '000' }}
+          GITHUB_TOKEN: ${{ secrets.MACBIN_GITHUB_TOKEN }}
+        run: macbin-batch farm/repos.txt
+
+      - name: Upload results
+        if: always() && vars.MACBIN_OUTPUT_DIR == ''
+        uses: actions/upload-artifact@v7
+        with:
+          name: macbin-output
+          path: |
+            ${{ env.OUTPUT_DIR }}/*/*/*.zip
+            ${{ env.OUTPUT_DIR }}/_logs/
+          if-no-files-found: warn

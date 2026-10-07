@@ -1,0 +1,7 @@
+cmake_minimum_required(VERSION 3.16)
+project(hello_cmake C CXX)
+add_library(greet SHARED greet.cpp)
+target_compile_definitions(greet PRIVATE GREET_BUILD)
+add_executable(hello_cmake main.c)
+target_link_libraries(hello_cmake PRIVATE greet)
+install(TARGETS hello_cmake greet RUNTIME DESTINATION bin LIBRARY DESTINATION lib ARCHIVE DESTINATION lib)

@@ -1,0 +1,140 @@
+# Reusable workflow: build the calling repository's Xcode project (iOS or macOS
+# app) or Swift package (macOS command-line tools) on a macOS runner. Apple's
+# SDKs only run on Macs, so this uses GitHub's macOS runners (free for public
+# repositories) or a self-hosted Mac - not the CI Runner Farm.
+#
+#   jobs:
+#     ios:
+#       uses: Krippler/MacBin/.github/workflows/build-apple.yml@main
+#       permissions:
+#         contents: write        # only needed to attach files to releases
+#       with:
+#         platform: ios
+#       secrets: inherit         # APPLE_CERTIFICATE etc., when signing
+name: Build Apple apps
+
+on:
+  workflow_call:
+    inputs:
+      runs-on:
+        description: JSON runner labels (default GitHub's macOS runner)
+        type: string
+        default: '["macos-latest"]'
+      platform:
+        description: ios or macos
+        type: string
+        default: ios
+      project:
+        description: .xcworkspace, .xcodeproj or folder with one (or with a Package.swift)
+        type: string
+        default: "."
+      scheme:
+        description: Xcode scheme (default the one named like the project, else the first)
+        type: string
+        default: ""
+      configuration:
+        type: string
+        default: Release
+      xcode-version:
+        description: Xcode to use, e.g. "26.0" (default the runner's default Xcode)
+        type: string
+        default: ""
+      export-method:
+        description: With a certificate - app-store-connect, release-testing, enterprise, debugging, developer-id or mac-application
+        type: string
+        default: ""
+      notarize:
+        description: Notarize and staple (macOS, developer-id; needs the App Store Connect key)
+        type: boolean
+        default: false
+      upload:
+        description: Upload to App Store Connect / TestFlight (app-store-connect; needs the key)
+        type: boolean
+        default: false
+      xcodebuild-args:
+        description: Extra xcodebuild (or swift build) arguments
+        type: string
+        default: ""
+      artifact-name:
+        type: string
+        default: apple-build
+      release:
+        description: Attach the files to the GitHub release when run for a tag
+        type: boolean
+        default: true
+    secrets:
+      APPLE_CERTIFICATE:
+        description: Signing certificate (.p12), base64-encoded. Without it the build is unsigned.
+        required: false
+      APPLE_CERTIFICATE_PASSWORD:
+        required: false
+      APPLE_PROVISIONING_PROFILES:
+        description: Provisioning profile(s), base64-encoded, comma-separated (iOS)
+        required: false
+      APP_STORE_CONNECT_KEY:
+        description: Contents of the App Store Connect API key (.p8)
+        required: false
+      APP_STORE_CONNECT_KEY_ID:
+        required: false
+      APP_STORE_CONNECT_ISSUER_ID:
+        required: false
+    outputs:
+      output-dir:
+        value: ${{ jobs.apple.outputs.output-dir }}
+
+jobs:
+  apple:
+    runs-on: ${{ fromJSON(inputs.runs-on) }}
+    outputs:
+      output-dir: ${{ steps.build.outputs.output-dir }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      # The build script lives in MacBin, next to this workflow.
+      - uses: actions/checkout@v7
+        with:
+          repository: Krippler/MacBin
+          path: .macbin-tool
+          sparse-checkout: apple
+
+      - name: Select Xcode
+        if: inputs.xcode-version != ''
+        env:
+          XCODE_VERSION: ${{ inputs.xcode-version }}
+        run: |
+          sudo xcode-select -s "/Applications/Xcode_$XCODE_VERSION.app" \
+            || { echo "::error::Xcode $XCODE_VERSION is not installed on this runner"; ls -d /Applications/Xcode*; exit 1; }
+          xcodebuild -version
+
+      - id: build
+        name: Build
+        env:
+          PLATFORM: ${{ inputs.platform }}
+          PROJECT: ${{ inputs.project }}
+          SCHEME: ${{ inputs.scheme }}
+          CONFIGURATION: ${{ inputs.configuration }}
+          EXPORT_METHOD: ${{ inputs.export-method }}
+          NOTARIZE: ${{ inputs.notarize && '1' || '0' }}
+          UPLOAD: ${{ inputs.upload && '1' || '0' }}
+          XCODEBUILD_ARGS: ${{ inputs.xcodebuild-args }}
+          CERT_P12_BASE64: ${{ secrets.APPLE_CERTIFICATE }}
+          CERT_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          PROFILES_BASE64: ${{ secrets.APPLE_PROVISIONING_PROFILES }}
+          ASC_KEY_P8: ${{ secrets.APP_STORE_CONNECT_KEY }}
+          ASC_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+        run: .macbin-tool/apple/build.sh
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ inputs.artifact-name }}
+          path: ${{ steps.build.outputs.files }}
+          if-no-files-found: ${{ inputs.upload && 'ignore' || 'error' }}
+
+      - name: Attach to release
+        if: inputs.release && github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v3
+        with:
+          files: ${{ steps.build.outputs.files }}
