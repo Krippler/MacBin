@@ -4,7 +4,7 @@
 #
 #   jobs:
 #     macos:
-#       uses: Krippler/MacBin/.github/workflows/build-macos.yml@main
+#       uses: Krippler/MacBin/.github/workflows/build-macos.yml@v0.1.0
 #       permissions:
 #         contents: write        # only needed to attach zips to releases
 #       with:
@@ -91,7 +91,7 @@ jobs:
           submodules: recursive
 
       - id: macbin
-        uses: Krippler/MacBin@main
+        uses: Krippler/MacBin@v0.1.0
         with:
           arch: ${{ inputs.arch }}
           macos-min: ${{ inputs.macos-min }}
