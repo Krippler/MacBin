@@ -1,4 +1,5 @@
-# Repositories built by the "Farm build" workflow on CI Runner Farm.
+# Repositories built for macOS by the "Farm build" workflow on CI Runner Farm
+# (farm/windows-repos.txt is the Windows list; a repository can be in both).
 # One per line:  <owner/repo | git URL> [ref] [KEY=VALUE ...]
 #   ref: branch, tag, commit, or @latest-tag; "-" for the default branch.
 # Patches go in farm/patches/<owner>_<repo>/*.patch

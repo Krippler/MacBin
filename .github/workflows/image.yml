@@ -28,7 +28,9 @@ jobs:
         run: tests/check-version.sh
 
       - name: Lint scripts
-        run: shellcheck -x -P lib scripts/* lib/common.sh tests/*.sh action/run.sh runner/*.sh docker/*.sh docker/macbin-tool apple/*.sh
+        run: |
+          shellcheck -x -P lib scripts/* lib/common.sh tests/*.sh action/run.sh runner/*.sh docker/*.sh docker/macbin-tool apple/*.sh
+          shellcheck -x -P windows/lib windows/scripts/* windows/lib/common.sh windows/action/run.sh
 
       - uses: docker/setup-buildx-action@v4
 
@@ -48,13 +50,22 @@ jobs:
           BUILDX_BUILDER: default
         run: BASE_IMAGE=macbin:runner-base runner/build-farm-image.sh macbin:runner
 
-      - name: Test
+      - name: Test macOS builds
         run: tests/run-runner-tests.sh macbin:runner "$RUNNER_TEMP/test-zips"
+
+      - name: Test Windows builds
+        run: tests/run-windows-tests.sh macbin:runner "$RUNNER_TEMP/test-zips-windows"
 
       - uses: actions/upload-artifact@v7
         with:
           name: test-zips
           path: ${{ runner.temp }}/test-zips/*.zip
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: test-zips-windows
+          path: ${{ runner.temp }}/test-zips-windows/*.zip
           if-no-files-found: error
 
   # The cross-compiled test binaries have to run on a real Mac.
@@ -70,9 +81,24 @@ jobs:
       - name: Run the binaries
         run: tests/run-on-mac.sh test-zips
 
-  # Publishing rebuilds from the build cache, once the binaries ran on a Mac.
+  # And the Windows ones on Windows.
+  run-on-windows:
+    needs: build
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v7
+        with:
+          name: test-zips-windows
+          path: test-zips-windows
+      - name: Run the binaries
+        shell: bash
+        run: tests/run-on-windows.sh test-zips-windows
+
+  # Publishing rebuilds from the build cache, once the binaries ran on a Mac
+  # and on Windows.
   publish:
-    needs: [build, run-on-mac]
+    needs: [build, run-on-mac, run-on-windows]
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     permissions:

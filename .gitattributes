@@ -1,0 +1,6 @@
+# Shell scripts run on Linux, macOS and Git Bash on Windows; keep them LF
+# even in a Windows checkout.
+*.sh text eol=lf
+scripts/* text eol=lf
+windows/scripts/* text eol=lf
+docker/macbin-tool text eol=lf

@@ -1,0 +1,611 @@
+#!/usr/bin/env bash
+# winbin-build - cross-compile a Git repository (or a local directory) into
+# Windows binaries using MinGW-w64, Rust and Go.
+#
+# Usage: winbin-build <git-url | owner/repo | /path/to/dir> [ref]
+#
+# Everything else is configured through environment variables; run with
+# --help for the full list.
+set -Eeuo pipefail
+
+WINBIN_HOME=${WINBIN_HOME:-/opt/winbin}
+# shellcheck source=../lib/common.sh
+source "$WINBIN_HOME/lib/common.sh"
+
+usage() {
+  cat <<'EOF'
+Usage: winbin-build <git-url | owner/repo | /path/to/dir> [ref]
+
+ref may be a branch, tag, commit SHA, or "@latest-tag" (highest version tag
+matching TAG_PATTERN). Without a ref the repository's default branch is used.
+
+Environment:
+  ARCH            x86_64 (default), i686, or "both"
+  BUILD_SYSTEM    auto (default) | cmake | meson | autotools | make | cargo | go | custom
+  BUILD_CMD       shell command to build (implies BUILD_SYSTEM=custom); runs in the
+                  source dir with CC/CXX/HOST/PREFIX/... exported
+  SUBDIR          build from this subdirectory of the repository
+  BUILD_TYPE      Release (default) - used for cmake/meson
+  STATIC          1 = link fully static (-static); default 0 (static libgcc/libstdc++ only)
+  CMAKE_ARGS, MESON_ARGS, CONFIGURE_ARGS, MAKE_ARGS, CARGO_ARGS
+                  extra arguments for the respective build system
+  GO_PACKAGES     packages to build (default: every main package except examples)
+  GO_ARGS, GO_LDFLAGS, GO_CGO=1
+  ARTIFACTS       space-separated globs (relative to the source dir) to collect
+                  instead of the automatic detection
+  PRE_BUILD_CMD   shell command run once in the source dir after checkout
+  TAG_PATTERN     regex used by @latest-tag (default: plain version tags)
+  BUNDLE_DLLS     1 (default) copy required MinGW runtime/library DLLs next to binaries
+  STRIP_BINARIES  1 (default) strip debug symbols
+  ZIP             1 (default) produce a .zip per architecture
+  FORCE           1 = rebuild even if this commit/config was already built
+  GITHUB_TOKEN    token for private GitHub repositories
+  OUTPUT_NAME, OUTPUT_LABEL  override the <name>/<label> output folder names
+  UMASK           umask for created files (e.g. 000 for Unraid shares)
+  OUTPUT_DIR, WORK_DIR (under $RUNNER_TEMP)  CONFIG_DIR (.winbin)  JOBS (nproc)
+EOF
+}
+
+# ---------------------------------------------------------------- settings --
+# Defaults stay inside the runner's writable areas (RUNNER_TEMP on Actions).
+OUTPUT_DIR=${OUTPUT_DIR:-${RUNNER_TEMP:-/tmp}/winbin/output}
+WORK_DIR=${WORK_DIR:-${RUNNER_TEMP:-/tmp}/winbin/work}
+CONFIG_DIR=${CONFIG_DIR:-${GITHUB_WORKSPACE:-$PWD}/.winbin}
+OUTPUT_NAME=${OUTPUT_NAME:-}
+OUTPUT_LABEL=${OUTPUT_LABEL:-}
+ARCH=${ARCH:-x86_64}
+BUILD_CMD=${BUILD_CMD:-}
+BUILD_SYSTEM=${BUILD_SYSTEM:-auto}
+[[ -n $BUILD_CMD && $BUILD_SYSTEM == auto ]] && BUILD_SYSTEM=custom
+BUILD_TYPE=${BUILD_TYPE:-Release}
+SUBDIR=${SUBDIR:-}
+STATIC=${STATIC:-0}
+BUNDLE_DLLS=${BUNDLE_DLLS:-1}
+STRIP_BINARIES=${STRIP_BINARIES:-1}
+ZIP=${ZIP:-1}
+FORCE=${FORCE:-0}
+KEEP_WORK=${KEEP_WORK:-0}
+JOBS=${JOBS:-$(nproc)}
+TAG_PATTERN=${TAG_PATTERN:-'^v?[0-9]+(\.[0-9]+)*$'}
+CMAKE_ARGS=${CMAKE_ARGS:-} MESON_ARGS=${MESON_ARGS:-} CONFIGURE_ARGS=${CONFIGURE_ARGS:-}
+MAKE_ARGS=${MAKE_ARGS:-} CARGO_ARGS=${CARGO_ARGS:-} GO_PACKAGES=${GO_PACKAGES:-}
+GO_ARGS=${GO_ARGS:-} GO_LDFLAGS=${GO_LDFLAGS:-} GO_CGO=${GO_CGO:-0}
+ARTIFACTS=${ARTIFACTS:-} PRE_BUILD_CMD=${PRE_BUILD_CMD:-}
+
+export GIT_TERMINAL_PROMPT=0
+# e.g. UMASK=000 so results on an Unraid share stay writable for SMB users.
+if [[ -n ${UMASK:-} ]]; then umask "$UMASK"; fi
+export CARGO_HOME=${CARGO_CACHE:-$WORK_DIR/cache/cargo}
+export GOMODCACHE=${GOMODCACHE:-$WORK_DIR/cache/go-mod}
+export GOCACHE=${GOCACHE:-$WORK_DIR/cache/go-build}
+
+# ------------------------------------------------------------------ source --
+SOURCE='' REF='' URL='' NAME='' REPO='' LABEL='' COMMIT='' FETCH_REF='' LOCAL=0
+
+setup_git_auth() {
+  [[ -n ${GITHUB_TOKEN:-} && $URL == https://github.com/* ]] || return 0
+  # Passed via GIT_CONFIG_* so the token never shows up on a command line.
+  export GIT_CONFIG_COUNT=1
+  export GIT_CONFIG_KEY_0="http.https://github.com/.extraheader"
+  GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GITHUB_TOKEN" | base64 -w0)"
+  export GIT_CONFIG_VALUE_0
+}
+
+sanitize() { local s=${1//[^A-Za-z0-9._-]/-}; printf '%s' "${s#-}"; }
+
+resolve_source() {
+  SOURCE=$(normalize_source "$1")
+  REF=${2:-}
+
+  if [[ -d $SOURCE ]]; then
+    LOCAL=1
+    SOURCE=$(realpath "$SOURCE")
+    REPO=$(basename "$SOURCE")
+    NAME=$(sanitize "$REPO")
+    COMMIT=$(git -C "$SOURCE" rev-parse HEAD 2>/dev/null || true)
+    LABEL="local${COMMIT:+-${COMMIT:0:7}}"
+    FORCE=1 # local trees can change without a new commit
+    return
+  fi
+
+  URL=$SOURCE
+  local path=${URL%/}
+  path=${path%.git}
+  path=${path#*://*/}   # https://host/owner/repo -> owner/repo
+  path=${path#git@*:}   # git@host:owner/repo    -> owner/repo
+  REPO=${path##*/}
+  local owner=${path%/*}
+  owner=${owner##*/}
+  NAME=$(sanitize "${owner:+${owner}_}$REPO")
+  setup_git_auth
+
+  local out
+  if [[ -z $REF ]]; then
+    out=$(git ls-remote --symref "$URL" HEAD) || die "cannot reach $URL"
+    local branch
+    branch=$(awk '$1 == "ref:" { sub("refs/heads/", "", $2); print $2; exit }' <<<"$out")
+    COMMIT=$(awk '$1 != "ref:" && $2 == "HEAD" { print $1; exit }' <<<"$out")
+    [[ -n $COMMIT ]] || die "could not determine the default branch of $URL"
+    FETCH_REF=${branch:+refs/heads/$branch}
+    FETCH_REF=${FETCH_REF:-HEAD}
+    LABEL="${branch:-HEAD}-${COMMIT:0:7}"
+    return
+  fi
+
+  if [[ $REF == @latest-tag || $REF == latest-tag ]]; then
+    out=$(git ls-remote --tags --refs "$URL") || die "cannot reach $URL"
+    REF=$(awk '{ sub("refs/tags/", "", $2); print $2 }' <<<"$out" \
+          | grep -E -- "$TAG_PATTERN" | sort -V | tail -n1) || true
+    [[ -n $REF ]] || die "no tag in $URL matches TAG_PATTERN '$TAG_PATTERN'"
+    log "latest tag: $REF"
+  fi
+
+  if [[ $REF =~ ^[0-9a-fA-F]{7,40}$ ]]; then
+    COMMIT=$REF FETCH_REF=$REF LABEL=${REF:0:7}
+    (( ${#REF} == 40 )) || COMMIT=  # abbreviated SHA: resolved after fetching
+    return
+  fi
+
+  out=$(git ls-remote "$URL" "refs/tags/$REF" "refs/tags/$REF^{}" "refs/heads/$REF") \
+    || die "cannot reach $URL"
+  local tag_sha peeled head_sha
+  tag_sha=$(awk -v r="refs/tags/$REF" '$2 == r { print $1 }' <<<"$out")
+  peeled=$(awk -v r="refs/tags/$REF^{}" '$2 == r { print $1 }' <<<"$out")
+  head_sha=$(awk -v r="refs/heads/$REF" '$2 == r { print $1 }' <<<"$out")
+  if [[ -n $tag_sha ]]; then
+    COMMIT=${peeled:-$tag_sha} FETCH_REF="refs/tags/$REF" LABEL=$(sanitize "$REF")
+  elif [[ -n $head_sha ]]; then
+    COMMIT=$head_sha FETCH_REF="refs/heads/$REF" LABEL="$(sanitize "$REF")-${head_sha:0:7}"
+  else
+    die "ref '$REF' not found in $URL"
+  fi
+}
+
+fetch_source() {
+  rm -rf "$BUILD_ROOT"
+  mkdir -p "$BUILD_ROOT"
+  if (( LOCAL )); then
+    log "copying local source $SOURCE"
+    cp -a "$SOURCE" "$SRC"
+    return
+  fi
+
+  log "fetching $URL ($FETCH_REF)"
+  git init -q "$SRC"
+  git -C "$SRC" remote add origin "$URL"
+  if git -C "$SRC" fetch -q --depth 1 origin "$FETCH_REF" 2>/dev/null; then
+    git -C "$SRC" checkout -q --detach FETCH_HEAD
+  else
+    log "shallow fetch not possible, fetching full history"
+    git -C "$SRC" fetch -q --tags origin '+refs/heads/*:refs/remotes/origin/*'
+    git -C "$SRC" checkout -q --detach "$REF"
+  fi
+  COMMIT=$(git -C "$SRC" rev-parse HEAD)
+
+  if [[ -f $SRC/.gitmodules ]]; then
+    log "updating submodules"
+    git -C "$SRC" submodule update -q --init --recursive --depth 1 --jobs 4 2>/dev/null \
+      || git -C "$SRC" submodule update -q --init --recursive --jobs 4
+  fi
+}
+
+apply_patches() {
+  local dir=$CONFIG_DIR/patches/$NAME p
+  [[ -d $dir ]] || return 0
+  for p in "$dir"/*.patch "$dir"/*.diff; do
+    [[ -f $p ]] || continue
+    log "applying patch $(basename "$p")"
+    git -C "$SRC" apply --whitespace=nowarn "$p" || die "patch $p failed to apply"
+  done
+}
+
+detect_build_system() {
+  local d=$1
+  if   [[ -f $d/Cargo.toml ]];        then echo cargo
+  elif [[ -f $d/go.mod ]];            then echo go
+  elif [[ -f $d/CMakeLists.txt ]];    then echo cmake
+  elif [[ -f $d/meson.build ]];       then echo meson
+  elif [[ -f $d/configure || -f $d/configure.ac || -f $d/configure.in || -f $d/autogen.sh ]]; then echo autotools
+  elif [[ -f $d/Makefile || -f $d/makefile || -f $d/GNUmakefile ]]; then echo make
+  else echo none
+  fi
+}
+
+# --------------------------------------------------------------- toolchain --
+setup_toolchain() {
+  case $1 in
+    x86_64|x64|amd64|win64) A=x86_64 WIN=win64 RUST_TARGET=x86_64-pc-windows-gnu GOARCH_=amd64 CPU_FAMILY=x86_64 ;;
+    i686|i386|x86|win32)    A=i686   WIN=win32 RUST_TARGET=i686-pc-windows-gnu   GOARCH_=386   CPU_FAMILY=x86 ;;
+    *) die "unsupported ARCH '$1' (use x86_64, i686 or both)" ;;
+  esac
+
+  HOST=$A-w64-mingw32
+  SYSROOT=/usr/$HOST
+  TOOLCHAIN_DESC="MinGW-w64 $HOST"
+  command -v "$HOST-gcc" >/dev/null || die "compiler $HOST-gcc not found"
+  TOOLCHAIN_DESC+=" ($("$HOST-gcc" -dumpversion))"
+
+  LINK_FLAGS="-static-libgcc -static-libstdc++"
+  # "--static" is gcc's alias for -static; unlike -static, libtool passes it through.
+  (( STATIC )) && LINK_FLAGS+=" --static"
+
+  if command -v "$HOST-pkg-config" >/dev/null; then
+    PKG_CONFIG_BIN=$HOST-pkg-config
+  else
+    PKG_CONFIG_BIN=pkg-config
+    export PKG_CONFIG_LIBDIR=$SYSROOT/lib/pkgconfig:$SYSROOT/share/pkgconfig
+  fi
+
+  # Wine lets CMake/Meson run freshly built helper tools; 32-bit needs wine32.
+  local wine=
+  if command -v wine >/dev/null && { [[ $A == x86_64 ]] || [[ -d /usr/lib/i386-linux-gnu/wine ]]; }; then
+    wine=$(command -v wine)
+  fi
+
+  TC_DIR=$BUILD_ROOT/toolchain-$A
+  mkdir -p "$TC_DIR"
+  {
+    echo "set(CMAKE_SYSTEM_NAME Windows)"
+    echo "set(CMAKE_SYSTEM_PROCESSOR $A)"
+    echo "set(CMAKE_C_COMPILER $HOST-gcc)"
+    echo "set(CMAKE_CXX_COMPILER $HOST-g++)"
+    echo "set(CMAKE_RC_COMPILER $HOST-windres)"
+    echo "set(CMAKE_FIND_ROOT_PATH $SYSROOT)"
+    echo "set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)"
+    echo "set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)"
+    echo "set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)"
+    echo "set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)"
+    echo "set(PKG_CONFIG_EXECUTABLE $PKG_CONFIG_BIN)"
+    echo "set(CMAKE_EXE_LINKER_FLAGS_INIT \"$LINK_FLAGS\")"
+    echo "set(CMAKE_SHARED_LINKER_FLAGS_INIT \"-static-libgcc -static-libstdc++\")"
+    echo "set(CMAKE_MODULE_LINKER_FLAGS_INIT \"-static-libgcc -static-libstdc++\")"
+    if [[ -n $wine ]]; then echo "set(CMAKE_CROSSCOMPILING_EMULATOR $wine)"; fi
+  } >"$TC_DIR/toolchain.cmake"
+
+  local link_list
+  # shellcheck disable=SC2086 # intentional word splitting
+  link_list=$(printf "'%s', " $LINK_FLAGS)
+  # shellcheck disable=SC2016 # the heredoc does expand
+  cat >"$TC_DIR/cross.ini" <<EOF
+[binaries]
+c = '$HOST-gcc'
+cpp = '$HOST-g++'
+ar = '$HOST-ar'
+strip = '$HOST-strip'
+windres = '$HOST-windres'
+pkg-config = '$PKG_CONFIG_BIN'
+${wine:+exe_wrapper = '$wine'}
+
+[built-in options]
+c_link_args = [${link_list%, }]
+cpp_link_args = [${link_list%, }]
+
+[host_machine]
+system = 'windows'
+cpu_family = '$CPU_FAMILY'
+cpu = '$A'
+endian = 'little'
+EOF
+}
+
+# Exports the classic cross-compilation variables (autotools / make / custom).
+cross_env() {
+  export HOST ARCH_NAME=$A
+  export CC=$HOST-gcc CXX=$HOST-g++ AR=$HOST-ar RANLIB=$HOST-ranlib NM=$HOST-nm
+  export LD=$HOST-ld STRIP=$HOST-strip OBJDUMP=$HOST-objdump DLLTOOL=$HOST-dlltool
+  export WINDRES=$HOST-windres RC=$HOST-windres PKG_CONFIG=$PKG_CONFIG_BIN
+  export CFLAGS=${CFLAGS:--O2} CXXFLAGS=${CXXFLAGS:--O2}
+  export LDFLAGS="${LDFLAGS:-} $LINK_FLAGS"
+  export PREFIX=$STAGE OS=Windows_NT CROSS_PREFIX=$HOST-
+}
+
+# ------------------------------------------------------------ build systems --
+build_cmake() {
+  local extra; split_words "$CMAKE_ARGS" extra
+  local gen=()
+  command -v ninja >/dev/null && gen=(-G Ninja)
+  cmake -S "$SRC_BUILD" -B "$BDIR" "${gen[@]}" \
+    -DCMAKE_TOOLCHAIN_FILE="$TC_DIR/toolchain.cmake" \
+    -DCMAKE_BUILD_TYPE="$BUILD_TYPE" \
+    -DCMAKE_INSTALL_PREFIX="$STAGE" \
+    -DBUILD_TESTING=OFF \
+    "${extra[@]}"
+  cmake --build "$BDIR" --parallel "$JOBS"
+  cmake --install "$BDIR" || warn "cmake install failed; collecting binaries from the build tree"
+}
+
+build_meson() {
+  local extra; split_words "$MESON_ARGS" extra
+  local opts=() buildtype
+  (( STATIC )) && opts+=(-Ddefault_library=static -Dprefer_static=true)
+  case ${BUILD_TYPE,,} in
+    relwithdebinfo) buildtype=debugoptimized ;;
+    minsizerel) buildtype=minsize ;;
+    *) buildtype=${BUILD_TYPE,,} ;;
+  esac
+  meson setup "$BDIR" "$SRC_BUILD" --cross-file "$TC_DIR/cross.ini" \
+    --prefix "$STAGE" --buildtype "$buildtype" "${opts[@]}" "${extra[@]}"
+  meson compile -C "$BDIR" -j "$JOBS"
+  meson install -C "$BDIR" --no-rebuild || warn "meson install failed; collecting binaries from the build tree"
+}
+
+build_autotools() {
+  local extra; split_words "$CONFIGURE_ARGS" extra
+  local margs; split_words "$MAKE_ARGS" margs
+  (
+    cd "$SRC_BUILD"
+    if [[ ! -x configure ]]; then
+      if [[ -x autogen.sh ]]; then NOCONFIGURE=1 ./autogen.sh; else autoreconf -fi; fi
+    fi
+  )
+  (
+    cross_env
+    local opts=()
+    (( STATIC )) && opts+=(--enable-static --disable-shared)
+    mkdir -p "$BDIR" && cd "$BDIR"
+    "$SRC_BUILD/configure" --host="$HOST" --prefix="$STAGE" "${opts[@]}" "${extra[@]}"
+    make -j "$JOBS" "${margs[@]}"
+    make install "${margs[@]}" || warn "make install failed; collecting binaries from the build tree"
+  )
+}
+
+# Plain Makefiles build in-tree, so every architecture gets its own copy.
+build_make() {
+  local margs; split_words "$MAKE_ARGS" margs
+  cp -a "$SRC_BUILD" "$BDIR"
+  (
+    cross_env
+    cd "$BDIR"
+    make -j "$JOBS" CC="$CC" CXX="$CXX" AR="$AR" RANLIB="$RANLIB" WINDRES="$WINDRES" "${margs[@]}"
+  )
+}
+
+build_custom() {
+  cp -a "$SRC_BUILD" "$BDIR"
+  (
+    cross_env
+    export WINBIN_ARCH=$A WINBIN_WIN=$WIN RUST_TARGET GOARCH_ STAGE OUT_DIR=$ARCH_OUT
+    cd "$BDIR"
+    bash -euo pipefail -c "$BUILD_CMD"
+  )
+}
+
+build_cargo() {
+  local extra; split_words "$CARGO_ARGS" extra
+  local t=${RUST_TARGET//-/_}
+  (
+    cd "$SRC_BUILD"
+    rustup target add "$RUST_TARGET" >/dev/null 2>&1 || true # honours rust-toolchain files
+    export "CARGO_TARGET_${t^^}_LINKER=$HOST-gcc"
+    export "CC_$t=$HOST-gcc" "CXX_$t=$HOST-g++" "AR_$t=$HOST-ar" "WINDRES_$t=$HOST-windres"
+    export CARGO_TARGET_DIR=$BDIR
+    cargo build --release --target "$RUST_TARGET" "${extra[@]}"
+  )
+  local f
+  mkdir -p "$ARCH_OUT"
+  for f in "$BDIR/$RUST_TARGET/release"/*.exe "$BDIR/$RUST_TARGET/release"/*.dll; do
+    if [[ -f $f ]]; then cp -a "$f" "$ARCH_OUT/"; fi
+  done
+}
+
+build_go() {
+  local extra; split_words "$GO_ARGS" extra
+  local pkgs; split_words "$GO_PACKAGES" pkgs
+  (
+    cd "$SRC_BUILD"
+    export GOOS=windows GOARCH=$GOARCH_ CGO_ENABLED=$GO_CGO
+    local ext=""
+    if (( GO_CGO )); then
+      export CC=$HOST-gcc CXX=$HOST-g++
+      ext="-extldflags '$LINK_FLAGS'"
+    fi
+    if (( ${#pkgs[@]} == 0 )); then
+      mapfile -t pkgs < <(go list -f '{{if eq .Name "main"}}{{.Dir}}{{end}}' ./... 2>/dev/null \
+        | grep -Ev '/(_?examples?|testdata|tests?|internal/tools)(/|$)' \
+        | sed "s|^$PWD|.|")
+      (( ${#pkgs[@]} )) || pkgs=(./...)
+    fi
+    log "go packages: ${pkgs[*]}"
+    mkdir -p "$ARCH_OUT"
+    go build -trimpath -ldflags "-s -w $GO_LDFLAGS $ext" "${extra[@]}" -o "$ARCH_OUT/" "${pkgs[@]}"
+  )
+}
+
+# --------------------------------------------------------------- packaging --
+has_binaries() { [[ -n $(find "$1" -type f \( -iname '*.exe' -o -iname '*.dll' \) -print -quit 2>/dev/null) ]]; }
+
+copy_binaries_flat() {
+  local from=$1 f
+  mkdir -p "$ARCH_OUT"
+  while IFS= read -r -d '' f; do
+    cp -a "$f" "$ARCH_OUT/"
+  done < <(find "$from" \( -name CMakeFiles -o -name .git -o -name '*.p' \) -prune -o \
+             -type f \( -iname '*.exe' -o -iname '*.dll' \) -print0)
+}
+
+collect() {
+  if [[ -n $ARTIFACTS ]]; then
+    local base=$SRC_BUILD pat f
+    [[ -d $BDIR ]] && base=$BDIR
+    mkdir -p "$ARCH_OUT"
+    for pat in $ARTIFACTS; do
+      for f in "$base"/$pat "$STAGE"/$pat; do
+        if [[ -e $f ]]; then cp -a "$f" "$ARCH_OUT/"; fi
+      done
+    done
+    has_binaries "$ARCH_OUT" || warn "ARTIFACTS matched no .exe/.dll files"
+    return 0
+  fi
+
+  case $SYSTEM in
+    cargo|go) ;; # already placed in $ARCH_OUT
+    *)
+      if has_binaries "$STAGE"; then
+        mkdir -p "$ARCH_OUT"
+        cp -a "$STAGE"/. "$ARCH_OUT"/
+        # Drop development files - only runtime pieces are useful on Windows.
+        rm -rf "$ARCH_OUT"/include "$ARCH_OUT"/lib/pkgconfig "$ARCH_OUT"/lib/cmake \
+               "$ARCH_OUT"/share/pkgconfig "$ARCH_OUT"/share/aclocal "$ARCH_OUT"/share/man \
+               "$ARCH_OUT"/share/info
+        find "$ARCH_OUT" -type f \( -name '*.a' -o -name '*.la' \) -delete
+        find "$ARCH_OUT" -depth -type d -empty -delete
+      else
+        copy_binaries_flat "$BDIR"
+      fi
+      ;;
+  esac
+  has_binaries "$ARCH_OUT" || die "build finished but no .exe/.dll files were found (set ARTIFACTS to point at them)"
+}
+
+copy_docs() {
+  local f
+  for f in "$SRC"/LICENSE* "$SRC"/LICENCE* "$SRC"/COPYING* "$SRC"/README*; do
+    if [[ -f $f ]]; then cp -a "$f" "$ARCH_OUT/"; fi
+  done
+}
+
+# Copies every non-system DLL a binary imports (recursively) next to it.
+bundle_dlls() {
+  local gcc_dir search=() queue=() f dll found dir s
+  local -A seen=() system=()
+  gcc_dir=$(dirname "$("$HOST-gcc" -print-libgcc-file-name)")
+  search=("$STAGE/bin" "$STAGE/lib" "$SYSROOT/bin" "$SYSROOT/lib" "$gcc_dir")
+  [[ -d $BDIR ]] && while IFS= read -r -d '' dir; do search+=("$dir"); done \
+    < <(find "$BDIR" -type f -iname '*.dll' -printf '%h\0' 2>/dev/null | sort -zu)
+
+  mapfile -d '' queue < <(find "$ARCH_OUT" -type f \( -iname '*.exe' -o -iname '*.dll' \) -print0)
+  while (( ${#queue[@]} )); do
+    f=${queue[0]}; queue=("${queue[@]:1}")
+    [[ -n ${seen[$f]:-} ]] && continue
+    seen[$f]=1
+    dir=$(dirname "$f")
+    while IFS= read -r dll; do
+      [[ -n $(find "$dir" -maxdepth 1 -iname "$dll" -print -quit) ]] && continue
+      found=
+      for s in "${search[@]}"; do
+        [[ -d $s ]] || continue
+        found=$(find "$s" -maxdepth 1 -type f -iname "$dll" -print -quit)
+        [[ -n $found ]] && break
+      done
+      if [[ -n $found ]]; then
+        log "bundling $(basename "$found") -> ${dir#"$ARCH_OUT"}/"
+        cp "$found" "$dir/"
+        queue+=("$dir/$(basename "$found")")
+      else
+        system[${dll,,}]=1
+      fi
+    done < <("$HOST-objdump" -p "$f" 2>/dev/null | awk '/DLL Name:/ { print $3 }')
+  done
+  if (( ${#system[@]} )); then
+    log "provided by Windows: $(printf '%s\n' "${!system[@]}" | sort | tr '\n' ' ')"
+  fi
+}
+
+strip_binaries() {
+  find "$ARCH_OUT" -type f \( -iname '*.exe' -o -iname '*.dll' \) \
+    -exec "$HOST-strip" --strip-unneeded {} + 2>/dev/null || true
+}
+
+write_buildinfo() {
+  {
+    echo "source:     ${URL:-$SOURCE}"
+    echo "ref:        ${REF:-${FETCH_REF:-local}}"
+    echo "commit:     ${COMMIT:-n/a}"
+    echo "arch:       $A ($WIN)"
+    echo "system:     $SYSTEM"
+    echo "toolchain:  $TOOLCHAIN_DESC"
+    echo "static:     $STATIC"
+    echo "built:      $(date -u +%Y-%m-%dT%H:%M:%SZ) by WinBin $WINBIN_VERSION"
+  } >"$ARCH_OUT/BUILDINFO.txt"
+}
+
+config_hash() {
+  local v
+  for v in ARCH BUILD_SYSTEM BUILD_CMD BUILD_TYPE SUBDIR STATIC CMAKE_ARGS \
+           MESON_ARGS CONFIGURE_ARGS MAKE_ARGS CARGO_ARGS GO_PACKAGES GO_ARGS GO_LDFLAGS GO_CGO \
+           ARTIFACTS PRE_BUILD_CMD BUNDLE_DLLS STRIP_BINARIES ZIP WINBIN_VERSION; do
+    printf '%s=%s\n' "$v" "${!v}"
+  done | sha256sum | cut -c1-16
+}
+
+# -------------------------------------------------------------------- main --
+main() {
+  case ${1:-} in -h|--help|help) usage; exit 0 ;; esac
+  local src=${1:-}
+  [[ -n $src ]] || { usage; exit 2; }
+
+  resolve_source "$src" "${2:-}"
+  [[ -n $OUTPUT_NAME ]] && NAME=$(sanitize "$OUTPUT_NAME")
+  [[ -n $OUTPUT_LABEL ]] && LABEL=$(sanitize "$OUTPUT_LABEL")
+
+  local archs a
+  case ${ARCH,,} in
+    both|all) archs=(x86_64 i686) ;;
+    *) read -ra archs <<<"${ARCH//,/ }" ;;
+  esac
+
+  DEST=$OUTPUT_DIR/$NAME/$LABEL
+  local marker=$DEST/.winbin cfg
+  cfg=$(config_hash)
+  if (( ! FORCE )) && [[ -n $COMMIT && -f $marker ]] \
+     && grep -qx "commit=$COMMIT" "$marker" && grep -qx "config=$cfg" "$marker"; then
+    ok "$NAME $LABEL is up to date (FORCE=1 to rebuild)"
+    printf '%s\n' "$NAME/$LABEL" >"$OUTPUT_DIR/.winbin-last"
+    return 0
+  fi
+
+  mkdir -p "$OUTPUT_DIR/_logs"
+  exec > >(tee "$OUTPUT_DIR/_logs/$NAME.log") 2>&1
+
+  log "WinBin $WINBIN_VERSION: building $NAME @ $LABEL for ${archs[*]}"
+  BUILD_ROOT=$WORK_DIR/builds/$NAME
+  SRC=$BUILD_ROOT/src
+  fetch_source
+  apply_patches
+  SRC_BUILD=$SRC${SUBDIR:+/$SUBDIR}
+  [[ -d $SRC_BUILD ]] || die "SUBDIR '$SUBDIR' does not exist"
+
+  if [[ -n $PRE_BUILD_CMD ]]; then
+    log "running PRE_BUILD_CMD"
+    (cd "$SRC_BUILD" && bash -euo pipefail -c "$PRE_BUILD_CMD")
+  fi
+
+  SYSTEM=$BUILD_SYSTEM
+  [[ $SYSTEM == auto ]] && SYSTEM=$(detect_build_system "$SRC_BUILD")
+  [[ $SYSTEM == none ]] && die "could not detect a build system; set BUILD_SYSTEM or BUILD_CMD"
+  declare -F "build_$SYSTEM" >/dev/null || die "unknown BUILD_SYSTEM '$SYSTEM'"
+  log "build system: $SYSTEM"
+
+  local partial=$OUTPUT_DIR/$NAME/.$LABEL.partial
+  rm -rf "$partial"
+  mkdir -p "$partial"
+
+  for a in "${archs[@]}"; do
+    setup_toolchain "$a"
+    [[ -n ${WINBIN_NO_GROUPS:-} ]] || group "WinBin: $NAME $LABEL ($WIN)"
+    log "[$WIN] toolchain: $TOOLCHAIN_DESC"
+    STAGE=$BUILD_ROOT/stage-$A BDIR=$BUILD_ROOT/build-$A ARCH_OUT=$partial/$WIN
+    rm -rf "$STAGE" "$BDIR"
+    "build_$SYSTEM"
+    collect
+    copy_docs
+    (( BUNDLE_DLLS )) && bundle_dlls
+    (( STRIP_BINARIES )) && strip_binaries
+    write_buildinfo
+    if (( ZIP )); then
+      (cd "$ARCH_OUT" && zip -q -r -9 "$partial/$REPO-$LABEL-$WIN.zip" .)
+    fi
+    ok "[$WIN] done: $(find "$ARCH_OUT" -type f \( -iname '*.exe' -o -iname '*.dll' \) -printf '%P ' )"
+    [[ -n ${WINBIN_NO_GROUPS:-} ]] || endgroup
+  done
+
+  printf 'commit=%s\nconfig=%s\n' "${COMMIT:-}" "$cfg" >"$partial/.winbin"
+  rm -rf "$DEST"
+  mv "$partial" "$DEST"
+  cp "$OUTPUT_DIR/_logs/$NAME.log" "$DEST/build.log" 2>/dev/null || true
+  (( KEEP_WORK )) || rm -rf "$BUILD_ROOT"
+  printf '%s\n' "$NAME/$LABEL" >"$OUTPUT_DIR/.winbin-last"
+  ok "output: $DEST"
+}
+
+main "$@"

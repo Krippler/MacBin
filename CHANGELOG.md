@@ -5,6 +5,21 @@ roughly the [Keep a Changelog](https://keepachangelog.com/) format. The top sect
 what the release workflow reads: `## [X.Y.Z] — DATE` on `main` publishes that version,
 `## [Unreleased]` publishes nothing. See RELEASING.md.
 
+## [0.2.0] — 2026-10-09
+
+### Added
+- **Windows binaries too, from the same runner image.** `runner-base-0.2.0` adds MinGW-w64 and
+  the Windows Rust targets, and builds CMake, Meson, Autotools, Make, Cargo and Go projects into
+  64-bit and 32-bit Windows `.exe`/`.dll` files with the DLLs they need. Projects use the new
+  reusable workflow `build-windows.yml` next to `build-macos.yml`. This is WinBin's Windows
+  support moved into MacBin (`windows/`): MacBin needs nothing from WinBin's repository or images,
+  so WinBin can be shut down. README → "Moving from WinBin" lists what to switch over first. CI runs the Windows test builds on a real Windows machine before publishing.
+- **Farm build for Windows**: repositories in `farm/windows-repos.txt` are built for Windows,
+  next to the macOS list in `farm/repos.txt`.
+
+### Changed
+- Farm build results are written to `<output>/macos/` and `<output>/windows/`.
+
 ## [0.1.0] — 2026-10-07
 
 ### Added

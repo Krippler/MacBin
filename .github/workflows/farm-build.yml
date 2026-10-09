@@ -1,5 +1,7 @@
-# Builds every repository in farm/repos.txt on a CI Runner Farm runner whose
+# Builds every repository in farm/repos.txt for macOS and every one in
+# farm/windows-repos.txt for Windows, on a CI Runner Farm runner whose
 # Dockerfile.github starts FROM ghcr.io/krippler/macbin:runner-base-<version>.
+# Results go to <output>/macos/ and <output>/windows/.
 #
 # Enable it by setting the repository variable MACBIN_FARM=true. Optional:
 #   MACBIN_OUTPUT_DIR  persistent output folder, e.g. /mnt/macbin when the farm
@@ -58,7 +60,13 @@ jobs:
           FORCE: ${{ inputs.force && '1' || '0' }}
           UMASK: ${{ vars.MACBIN_UMASK || '000' }}
           GITHUB_TOKEN: ${{ secrets.MACBIN_GITHUB_TOKEN }}
-        run: macbin-batch farm/repos.txt
+        # Each platform gets its own output folder: both tools replace a
+        # repository's <name>/<label> folder when they build it.
+        run: |
+          rc=0
+          OUTPUT_DIR=$OUTPUT_DIR/macos macbin-batch farm/repos.txt || rc=1
+          OUTPUT_DIR=$OUTPUT_DIR/windows WORK_DIR=$WORK_DIR/windows winbin-batch farm/windows-repos.txt || rc=1
+          exit $rc
 
       - name: Upload results
         if: always() && vars.MACBIN_OUTPUT_DIR == ''
@@ -66,6 +74,6 @@ jobs:
         with:
           name: macbin-output
           path: |
-            ${{ env.OUTPUT_DIR }}/*/*/*.zip
-            ${{ env.OUTPUT_DIR }}/_logs/
+            ${{ env.OUTPUT_DIR }}/*/*/*/*.zip
+            ${{ env.OUTPUT_DIR }}/*/_logs/
           if-no-files-found: warn

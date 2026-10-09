@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+# winbin-batch - build every repository listed in a repos file.
+#
+# File format, one repository per line (blank lines and # comments ignored):
+#   <git-url | owner/repo> [ref] [KEY=VALUE ...]
+# Use "-" as the ref to mean the default branch when you need options.
+# Values may be quoted:  CMAKE_ARGS="-DFOO=ON -DBAR=OFF"
+set -Eeuo pipefail
+
+WINBIN_HOME=${WINBIN_HOME:-/opt/winbin}
+# shellcheck source=../lib/common.sh
+source "$WINBIN_HOME/lib/common.sh"
+
+file=${1:?usage: winbin-batch <repos-file>}
+[[ -f $file ]] || die "repos file not found: $file"
+
+mapfile -t lines <"$file"
+built=() failed=() tok=()
+lineno=0
+for line in "${lines[@]}"; do
+  lineno=$((lineno + 1))
+  line=${line%$'\r'}
+  [[ $line =~ ^[[:space:]]*(#|$) ]] && continue
+
+  if ! split_words "$line" tok 2>/dev/null || (( ${#tok[@]} == 0 )); then
+    warn "$file:$lineno: cannot parse line, skipping"
+    failed+=("line $lineno")
+    continue
+  fi
+
+  src=${tok[0]} ref="" envs=() bad=0
+  rest=("${tok[@]:1}")
+  if (( ${#rest[@]} )) && [[ ${rest[0]} != *=* ]]; then
+    ref=${rest[0]}
+    [[ $ref == - ]] && ref=""
+    rest=("${rest[@]:1}")
+  fi
+  for kv in "${rest[@]}"; do
+    if [[ $kv =~ ^[A-Z_][A-Z0-9_]*= ]]; then
+      envs+=("$kv")
+    else
+      warn "$file:$lineno: ignoring invalid option '$kv' (expected KEY=VALUE)"
+      bad=1
+    fi
+  done
+
+  group "$src ${ref:-(default branch)}"
+  log "=== $src ${ref:-(default branch)} ${envs[*]}"
+  if (( ! bad )) && env WINBIN_NO_GROUPS=1 "${envs[@]}" "$WINBIN_HOME/bin/winbin-build" "$src" "$ref" </dev/null; then
+    built+=("$src")
+  else
+    failed+=("$src")
+  fi
+  endgroup
+done
+
+log "=== summary: ${#built[@]} ok, ${#failed[@]} failed"
+for f in "${failed[@]}"; do warn "failed: $f"; done
+(( ${#failed[@]} == 0 ))
