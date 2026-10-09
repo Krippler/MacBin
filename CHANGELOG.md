@@ -1,9 +1,19 @@
 # Changelog
 
-All notable changes to MacBin. Versions follow [Semantic Versioning](https://semver.org/) and
+All notable changes to WMBin (called MacBin until 0.3.0). Versions follow [Semantic Versioning](https://semver.org/) and
 roughly the [Keep a Changelog](https://keepachangelog.com/) format. The top section's heading is
 what the release workflow reads: `## [X.Y.Z] — DATE` on `main` publishes that version,
 `## [Unreleased]` publishes nothing. See RELEASING.md.
+
+## [0.3.0] — 2026-10-09
+
+### Changed
+- **MacBin is now WMBin**, at [github.com/Krippler/WMBin](https://github.com/Krippler/WMBin). The
+  runner image moves to `ghcr.io/krippler/wmbin:runner-base-0.3.0`, and workflows are referenced as
+  `Krippler/WMBin/.github/workflows/…@v0.3.0`, `Krippler/WMBin@v0.3.0` and
+  `Krippler/WMBin/windows@v0.3.0`. README → "Moving from MacBin or WinBin" lists what to switch.
+  The old `ghcr.io/krippler/macbin` images stay available; the commands on the runner and the
+  `MACBIN_*` settings keep their names.
 
 ## [0.2.0] — 2026-10-09
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Tests the Windows GitHub Action (windows/action/run.sh) the way CI Runner
-# Farm runs it: inside the MacBin runner image, as the non-root "runner" user.
+# Farm runs it: inside the WMBin runner image, as the non-root "runner" user.
 # These started out as WinBin's action tests.
 #
 # Usage: tests/run-windows-tests.sh <runner-image> [zip-dir]
@@ -42,7 +42,7 @@ for fx in c-cmake cpp-meson c-autotools c-make rust-cargo go-mod; do
   n=$(find "$dir" -name "*.exe" | xargs -r file | grep -c "PE32" || true)
   [ "$n" -ge 2 ] && echo "ok:   $fx ($n exe, as $(id -un))" || { echo "FAIL: $fx: no PE executables"; rc=1; }
 done
-grep -q "MacBin (Windows)" "$GITHUB_STEP_SUMMARY" || { echo "FAIL: no step summary"; rc=1; }
+grep -q "WMBin (Windows)" "$GITHUB_STEP_SUMMARY" || { echo "FAIL: no step summary"; rc=1; }
 
 # Tag build: label from the tag, static linking, options via the env input.
 rm -rf /tmp/ws/tagged && cp -r /fixtures/cpp-meson /tmp/ws/tagged

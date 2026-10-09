@@ -3,6 +3,6 @@ import SwiftUI
 @main
 struct HelloApp: App {
   var body: some Scene {
-    WindowGroup { Text("Hello from MacBin") }
+    WindowGroup { Text("Hello from WMBin") }
   }
 }

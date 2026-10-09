@@ -1,8 +1,8 @@
 # shellcheck shell=bash
-# Shared helpers for the MacBin scripts.
+# Shared helpers for the WMBin scripts.
 
 # shellcheck disable=SC2034 # used by the scripts sourcing this file
-MACBIN_VERSION="0.2.0"
+MACBIN_VERSION="0.3.0"
 
 if [[ -t 2 ]]; then
   _c_info=$'\e[1;34m' _c_warn=$'\e[1;33m' _c_err=$'\e[1;31m' _c_ok=$'\e[1;32m' _c_off=$'\e[0m'
@@ -15,8 +15,8 @@ ok()   { printf '%s[macbin]%s %s\n' "$_c_ok" "$_c_off" "$*" >&2; }
 
 if [[ ${GITHUB_ACTIONS:-} == true ]]; then
   # Surface problems as annotations on the workflow run.
-  warn() { printf '::warning title=MacBin::%s\n' "$*" >&2; }
-  die()  { printf '::error title=MacBin::%s\n' "$*" >&2; exit 1; }
+  warn() { printf '::warning title=WMBin::%s\n' "$*" >&2; }
+  die()  { printf '::error title=WMBin::%s\n' "$*" >&2; exit 1; }
   group()    { printf '::group::%s\n' "$*"; }
   endgroup() { printf '::endgroup::\n'; }
 else

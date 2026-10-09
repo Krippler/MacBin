@@ -5,7 +5,7 @@
 #
 #   jobs:
 #     ios:
-#       uses: Krippler/MacBin/.github/workflows/build-apple.yml@v0.2.0
+#       uses: Krippler/WMBin/.github/workflows/build-apple.yml@v0.3.0
 #       permissions:
 #         contents: write        # only needed to attach files to releases
 #       with:
@@ -92,11 +92,11 @@ jobs:
         with:
           submodules: recursive
 
-      # The build script lives in MacBin, next to this workflow.
+      # The build script lives in WMBin, next to this workflow.
       - uses: actions/checkout@v7
         with:
-          repository: Krippler/MacBin
-          ref: v0.2.0
+          repository: Krippler/WMBin
+          ref: v0.3.0
           path: .macbin-tool
           sparse-checkout: apple
 

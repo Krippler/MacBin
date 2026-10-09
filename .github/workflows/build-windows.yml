@@ -1,10 +1,10 @@
 # Reusable workflow: build Windows binaries for the calling repository on a
 # CI Runner Farm runner whose Dockerfile.github starts with
-#   FROM ghcr.io/krippler/macbin:runner-base-<version>
+#   FROM ghcr.io/krippler/wmbin:runner-base-<version>
 #
 #   jobs:
 #     windows:
-#       uses: Krippler/MacBin/.github/workflows/build-windows.yml@v0.2.0
+#       uses: Krippler/WMBin/.github/workflows/build-windows.yml@v0.3.0
 #       permissions:
 #         contents: write        # only needed to attach zips to releases
 #       with:
@@ -74,7 +74,7 @@ jobs:
           submodules: recursive
 
       - id: winbin
-        uses: Krippler/MacBin/windows@v0.2.0
+        uses: Krippler/WMBin/windows@v0.3.0
         with:
           arch: ${{ inputs.arch }}
           build-system: ${{ inputs.build-system }}

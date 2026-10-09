@@ -1,13 +1,13 @@
 # syntax=docker/dockerfile:1
-# MacBin runner base: a GitHub Actions self-hosted runner image
+# WMBin runner base: a GitHub Actions self-hosted runner image
 # (myoung34/github-runner, Ubuntu 24.04) that builds macOS and Windows
 # binaries: zig (as an SDK-free macOS cross compiler), LLVM's Mach-O tools and
 # rcodesign for macOS, MinGW-w64 for Windows, Rust (macOS and Windows targets),
-# Go, and the MacBin build scripts (macbin-build, winbin-build).
+# Go, and the WMBin build scripts (macbin-build, winbin-build).
 #
 # Use it as the FROM line of the CI Runner Farm's Dockerfile.github
 # (https://github.com/unraid/ci-runner-farm), pinned to a release:
-#   FROM ghcr.io/krippler/macbin:runner-base-<version>
+#   FROM ghcr.io/krippler/wmbin:runner-base-<version>
 ARG GO_VERSION=1.27
 ARG RUST_IMAGE=rust:1-bookworm
 ARG RUNNER_BASE=myoung34/github-runner:ubuntu-noble
@@ -74,7 +74,7 @@ RUN mkdir -p /home/runner/.cargo/registry /home/runner/.cargo/git \
       /home/runner/go/pkg/mod /home/runner/.cache/go-build /home/runner/.cache/zig \
  && chown -R runner:runner /home/runner/.cargo /home/runner/go /home/runner/.cache
 
-LABEL org.opencontainers.image.title="MacBin runner base" \
+LABEL org.opencontainers.image.title="WMBin runner base" \
       org.opencontainers.image.description="GitHub Actions runner with zig, LLVM, rcodesign, MinGW-w64, Rust and Go for building macOS and Windows binaries" \
-      org.opencontainers.image.source="https://github.com/Krippler/MacBin" \
+      org.opencontainers.image.source="https://github.com/Krippler/WMBin" \
       org.opencontainers.image.licenses="GPL-2.0"

@@ -1,5 +1,5 @@
-name: MacBin - build Windows binaries
-description: Cross-compile a project into Windows .exe/.dll files on a CI Runner Farm runner that uses the MacBin runner image
+name: WMBin - build Windows binaries
+description: Cross-compile a project into Windows .exe/.dll files on a CI Runner Farm runner that uses the WMBin runner image
 author: Krippler
 branding:
   icon: package

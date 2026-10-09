@@ -1,24 +1,24 @@
-# MacBin
+# WMBin
 
-MacBin builds macOS and Windows binaries for your GitHub projects on
+WMBin builds macOS and Windows binaries for your GitHub projects on
 [CI Runner Farm](https://github.com/unraid/ci-runner-farm) runners on Unraid, with no Mac, no
 Windows machine and no Apple SDK. One runner image covers both:
 
 - **macOS**: zig (as the macOS cross compiler), LLVM's Mach-O tools and
   [rcodesign](https://github.com/indygreg/apple-platform-rs) build for Apple Silicon (arm64), Intel
-  (x86_64), or both in one universal binary. MacBin bundles the project's own `.dylib`s, signs
+  (x86_64), or both in one universal binary. WMBin bundles the project's own `.dylib`s, signs
   everything (ad-hoc, or with your Developer ID) and zips the results.
 - **Windows**: MinGW-w64 builds 64-bit and/or 32-bit `.exe`/`.dll` files, with the DLLs they need
   copied next to them. See [Windows binaries](#windows-binaries).
 
-Both build CMake, Meson, Autotools, Make, Cargo (Rust) and Go projects. The Windows support used
-to be a separate project, WinBin, and now lives entirely in MacBin; see
-[Moving from WinBin](#moving-from-winbin).
+Both build CMake, Meson, Autotools, Make, Cargo (Rust) and Go projects. WMBin was called MacBin
+until 0.3.0, and its Windows support used to be a separate project, WinBin; see
+[Moving from MacBin or WinBin](#moving-from-macbin-or-winbin).
 
 What the farm can't build for macOS:
 
 - **iOS apps, and macOS apps that use Apple frameworks or Swift** (Cocoa, SwiftUI, Metal, ...).
-  These need Xcode and Apple's SDKs, which only run on a Mac. MacBin has a second workflow for them
+  These need Xcode and Apple's SDKs, which only run on a Mac. WMBin has a second workflow for them
   that runs on a Mac instead; see [iOS and macOS apps](#ios-and-macos-apps).
 - Command-line programs that link an Apple framework, unless you supply an SDK (see `MACOS_SDK`
   under [Options](#options)).
@@ -29,14 +29,14 @@ In **Settings → Utilities → CI Runner Farm → Runner image**, change the fi
 `Dockerfile.github` to:
 
 ```dockerfile
-FROM ghcr.io/krippler/macbin:runner-base-0.2.0
+FROM ghcr.io/krippler/wmbin:runner-base-0.3.0
 ```
 
 Leave the rest of the file as it is. Click **Build**, then **Restart** on the Fleet tab. If the
 farm's image auto-update is on, the runners pick up the new image on their own.
 
-To update MacBin later, change the version number to a newer `runner-base-X.Y.Z` tag from the
-[package page](https://github.com/Krippler/MacBin/pkgs/container/macbin), then Build and Restart
+To update WMBin later, change the version number to a newer `runner-base-X.Y.Z` tag from the
+[package page](https://github.com/Krippler/WMBin/pkgs/container/wmbin), then Build and Restart
 again. Use the same version in the workflow references below (`@vX.Y.Z`).
 
 ## Building a project for macOS
@@ -51,7 +51,7 @@ on:
   workflow_dispatch:
 jobs:
   macos:
-    uses: Krippler/MacBin/.github/workflows/build-macos.yml@v0.2.0
+    uses: Krippler/WMBin/.github/workflows/build-macos.yml@v0.3.0
     permissions:
       contents: write   # to attach the zips to the release
     with:
@@ -61,8 +61,8 @@ jobs:
 The workflow builds the project and uploads the zips as an artifact. When you push a tag, it also
 attaches them to that release.
 
-It runs on any `self-hosted` runner. If some of your runners don't use the MacBin image, add a label
-that only the MacBin runners have and pass it as `runs-on: '["self-hosted", "your-label"]'`.
+It runs on any `self-hosted` runner. If some of your runners don't use the WMBin image, add a label
+that only the WMBin runners have and pass it as `runs-on: '["self-hosted", "your-label"]'`.
 
 ### Options
 
@@ -90,7 +90,7 @@ only allows using it on Apple-branded computers, so check that your setup qualif
 
 ### Signing and notarization
 
-Apple Silicon Macs only run signed code, so MacBin always signs at least ad-hoc. That's enough for
+Apple Silicon Macs only run signed code, so WMBin always signs at least ad-hoc. That's enough for
 binaries installed with Homebrew, `curl` or a package manager. Files downloaded in a browser get
 quarantined, though: macOS refuses to open them until you run `xattr -d com.apple.quarantine <file>`
 or allow them in **System Settings → Privacy & Security**.
@@ -106,7 +106,7 @@ on:
 | `NOTARY_API_KEY` | Optional: an App Store Connect API key, converted with `rcodesign encode-app-store-connect-api-key -o key.json <issuer-id> <key-id> AuthKey_XXXX.p8`. Its content notarizes the zips. |
 
 ```yaml
-    uses: Krippler/MacBin/.github/workflows/build-macos.yml@v0.2.0
+    uses: Krippler/WMBin/.github/workflows/build-macos.yml@v0.3.0
     secrets: inherit
 ```
 
@@ -126,11 +126,11 @@ on:
   workflow_dispatch:
 jobs:
   macos:
-    uses: Krippler/MacBin/.github/workflows/build-macos.yml@v0.2.0
+    uses: Krippler/WMBin/.github/workflows/build-macos.yml@v0.3.0
     permissions:
       contents: write
   windows:
-    uses: Krippler/MacBin/.github/workflows/build-windows.yml@v0.2.0
+    uses: Krippler/WMBin/.github/workflows/build-windows.yml@v0.3.0
     permissions:
       contents: write
     with:
@@ -156,18 +156,22 @@ README, and a `BUILDINFO.txt`. Projects that need MSVC (`.sln`/MSBuild) or .NET 
 On the runner the Windows tools are `winbin-build` and `winbin-batch`, the same commands as in
 WinBin, so build scripts written for WinBin keep working.
 
-### Moving from WinBin
+### Moving from MacBin or WinBin
 
-MacBin doesn't use anything from WinBin's repository or images, but anything that still points at
-WinBin stops working once WinBin is gone. Before shutting it down:
+WMBin needs nothing from WinBin, and nothing from MacBin's old name. Setups that still use either
+should switch over:
 
 | Where | Change |
 |---|---|
-| Farm `Dockerfile.github` | `FROM ghcr.io/krippler/winbin:runner-base-…` → `FROM ghcr.io/krippler/macbin:runner-base-0.2.0` |
-| Project workflows | `uses: Krippler/WinBin/.github/workflows/build-windows.yml@…` → `uses: Krippler/MacBin/.github/workflows/build-windows.yml@v0.2.0` (same inputs) |
-| Workflows using the action directly | `uses: Krippler/WinBin@…` → `uses: Krippler/MacBin/windows@v0.2.0` (same inputs) |
-| WinBin's `farm/repos.txt` | Move the lines to MacBin's `farm/windows-repos.txt`, and any `farm/patches/` folders too |
-| Farm build output share | Results now go to `windows/` under `MACBIN_OUTPUT_DIR` (see below) |
+| Farm `Dockerfile.github` | `FROM ghcr.io/krippler/macbin:…` or `FROM ghcr.io/krippler/winbin:…` → `FROM ghcr.io/krippler/wmbin:runner-base-0.3.0` |
+| Project workflows | `Krippler/MacBin/.github/workflows/…@…` or `Krippler/WinBin/.github/workflows/build-windows.yml@…` → `Krippler/WMBin/.github/workflows/…@v0.3.0` (same inputs) |
+| Workflows using the actions directly | `Krippler/MacBin@…` → `Krippler/WMBin@v0.3.0`; `Krippler/MacBin/windows@…` or `Krippler/WinBin@…` → `Krippler/WMBin/windows@v0.3.0` |
+| WinBin's `farm/repos.txt` | Move the lines to WMBin's `farm/windows-repos.txt`, and any `farm/patches/` folders too |
+| Farm build output share | Results go to `macos/` and `windows/` under `MACBIN_OUTPUT_DIR` (see below) |
+
+The images MacBin published (`ghcr.io/krippler/macbin:runner-base-0.1.0` and `-0.2.0`) stay
+available but get no updates. The commands on the runner (`macbin-build`, `winbin-build`, …) and
+the `MACBIN_*` settings keep their names, so build scripts and repository variables carry over.
 
 ## Scheduled builds of other repositories
 
@@ -188,8 +192,8 @@ To turn it on, set the repository variable `MACBIN_FARM=true`. The results are u
 artifacts.
 
 To have them written to an Unraid share instead, set the farm's `USER_SHARE_MOUNTS` to
-`/mnt/user/macbin/output:/mnt/macbin:rw` and the repository variable `MACBIN_OUTPUT_DIR` to
-`/mnt/macbin`. The builds land in `macos/` and `windows/` there, and commits that were already
+`/mnt/user/wmbin/output:/mnt/wmbin:rw` and the repository variable `MACBIN_OUTPUT_DIR` to
+`/mnt/wmbin`. The builds land in `macos/` and `windows/` there, and commits that were already
 built are skipped.
 
 ## Optional: faster builds
@@ -215,7 +219,7 @@ on:
   workflow_dispatch:
 jobs:
   ios:
-    uses: Krippler/MacBin/.github/workflows/build-apple.yml@v0.2.0
+    uses: Krippler/WMBin/.github/workflows/build-apple.yml@v0.3.0
     permissions:
       contents: write
     with:

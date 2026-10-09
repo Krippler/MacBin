@@ -181,6 +181,6 @@ jobs:
           printf '\nRunner image: %s\n' "\`$image\`" >>"$RUNNER_TEMP/notes.md"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git tag -a "$tag" -m "MacBin $version"
+          git tag -a "$tag" -m "WMBin $version"
           git push origin "$tag"
-          gh release create "$tag" --verify-tag --title "MacBin $version" --notes-file "$RUNNER_TEMP/notes.md"
+          gh release create "$tag" --verify-tag --title "WMBin $version" --notes-file "$RUNNER_TEMP/notes.md"

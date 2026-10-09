@@ -1,4 +1,4 @@
-# Releasing MacBin
+# Releasing WMBin
 
 Merging a release PR into `main` is all it takes. No tag needs to be pushed from anyone's machine.
 
@@ -20,8 +20,8 @@ Open a release PR (branch name like `release-v0.2.0`) that sets the new version 
 it appears:
 
 - `MACBIN_VERSION` in `lib/common.sh`
-- `uses: Krippler/MacBin@vX.Y.Z` in `.github/workflows/build-macos.yml`
-- `uses: Krippler/MacBin/windows@vX.Y.Z` in `.github/workflows/build-windows.yml`
+- `uses: Krippler/WMBin@vX.Y.Z` in `.github/workflows/build-macos.yml`
+- `uses: Krippler/WMBin/windows@vX.Y.Z` in `.github/workflows/build-windows.yml`
 - `ref: vX.Y.Z` in `.github/workflows/build-apple.yml`
 - the `@vX.Y.Z` workflow references and the `runner-base-X.Y.Z` image in `README.md`
 - `CHANGELOG.md`: retitle `## [Unreleased]` to `## [X.Y.Z] — YYYY-MM-DD`

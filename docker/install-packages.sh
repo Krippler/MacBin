@@ -1,5 +1,5 @@
 #!/bin/sh
-# Installs the build tools MacBin uses into the runner base image (see
+# Installs the build tools WMBin uses into the runner base image (see
 # Dockerfile): LLVM's Mach-O tools and the MinGW-w64 cross toolchain for
 # Windows, CMake, Meson, Autotools and friends. The macOS compilers come from
 # zig (docker/install-toolchain.sh).

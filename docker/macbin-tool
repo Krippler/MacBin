@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# macbin-tool - the cross tools MacBin puts on PATH, dispatched on the name it
+# macbin-tool - the cross tools WMBin puts on PATH, dispatched on the name it
 # is called as (see docker/install-toolchain.sh for the links):
 #
 #   <triple>-cc / -gcc / -clang        zig cc  for that macOS target
