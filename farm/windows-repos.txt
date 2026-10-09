@@ -1,0 +1,9 @@
+# Repositories built for Windows by the "Farm build" workflow on CI Runner Farm
+# (farm/repos.txt is the macOS list; a repository can be in both).
+# One per line:  <owner/repo | git URL> [ref] [KEY=VALUE ...]
+#   ref: branch, tag, commit, or @latest-tag; "-" for the default branch.
+#   ARCH: x86_64 (default), i686 or both. Options: see winbin-build --help.
+# Patches go in farm/patches/<owner>_<repo>/*.patch (shared with macOS).
+#
+# BurntSushi/ripgrep @latest-tag
+# junegunn/fzf @latest-tag ARCH=both

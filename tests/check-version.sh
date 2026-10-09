@@ -17,6 +17,8 @@ while IFS= read -r ref; do
   [[ $ref == "@v$v" ]] || bad README.md "workflow reference $ref should be @v$v"
 done < <(grep -o 'Krippler/MacBin/[^ ]*@[^ ]*' README.md | grep -o '@.*$')
 grep -q "runner-base-$v\$" README.md || bad README.md "the setup FROM line should use runner-base-$v"
+grep -q "uses: Krippler/MacBin/windows@v$v\$" .github/workflows/build-windows.yml \
+  || bad .github/workflows/build-windows.yml "the action must be Krippler/MacBin/windows@v$v"
 
 # The newest version in the changelog is MACBIN_VERSION ([Unreleased] may sit above it).
 top=$(sed -nE 's/^## \[([0-9]+\.[0-9]+\.[0-9]+)\].*/\1/p' CHANGELOG.md | head -n1)

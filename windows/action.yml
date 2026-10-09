@@ -1,0 +1,100 @@
+name: MacBin - build Windows binaries
+description: Cross-compile a project into Windows .exe/.dll files on a CI Runner Farm runner that uses the MacBin runner image
+author: Krippler
+branding:
+  icon: package
+  color: blue
+
+inputs:
+  source:
+    description: What to build - "." for the checked-out workspace, a path, owner/repo or a git URL
+    default: "."
+  ref:
+    description: Branch, tag, commit or @latest-tag when source is a repository
+    default: ""
+  arch:
+    description: x86_64, i686 or both
+    default: x86_64
+  build-system:
+    description: auto, cmake, meson, autotools, make, cargo, go or custom
+    default: auto
+  build-cmd:
+    description: Custom build command (implies build-system custom)
+    default: ""
+  subdir:
+    description: Build from this subdirectory
+    default: ""
+  static:
+    description: "true for fully static executables"
+    default: "false"
+  cmake-args:
+    description: Extra CMake arguments
+    default: ""
+  meson-args:
+    description: Extra Meson arguments
+    default: ""
+  configure-args:
+    description: Extra ./configure arguments
+    default: ""
+  make-args:
+    description: Extra make arguments
+    default: ""
+  cargo-args:
+    description: Extra cargo build arguments
+    default: ""
+  go-packages:
+    description: Go packages to build (default every main package)
+    default: ""
+  artifacts:
+    description: Globs of files to collect instead of automatic detection
+    default: ""
+  env:
+    description: Further winbin-build settings, one KEY=VALUE per line
+    default: ""
+  output-dir:
+    description: Where results are written (default <runner temp>/winbin/output)
+    default: ""
+  name:
+    description: Output folder name (default the repository name)
+    default: ""
+  label:
+    description: Output version label (default the tag name, or branch-shortsha)
+    default: ""
+  token:
+    description: Token used to clone private repositories when source is a repository
+    default: ""
+
+outputs:
+  output-dir:
+    description: Folder with the results (<output-dir>/<name>/<label>)
+    value: ${{ steps.build.outputs.output-dir }}
+  zips:
+    description: Newline-separated list of the produced zip files
+    value: ${{ steps.build.outputs.zips }}
+
+runs:
+  using: composite
+  steps:
+    - id: build
+      shell: bash
+      run: '"$GITHUB_ACTION_PATH/action/run.sh"'
+      env:
+        IN_SOURCE: ${{ inputs.source }}
+        IN_REF: ${{ inputs.ref }}
+        IN_ENV: ${{ inputs.env }}
+        IN_OUTPUT_DIR: ${{ inputs.output-dir }}
+        IN_NAME: ${{ inputs.name }}
+        IN_LABEL: ${{ inputs.label }}
+        IN_TOKEN: ${{ inputs.token }}
+        IN_STATIC: ${{ inputs.static }}
+        ARCH: ${{ inputs.arch }}
+        BUILD_SYSTEM: ${{ inputs.build-system }}
+        BUILD_CMD: ${{ inputs.build-cmd }}
+        SUBDIR: ${{ inputs.subdir }}
+        CMAKE_ARGS: ${{ inputs.cmake-args }}
+        MESON_ARGS: ${{ inputs.meson-args }}
+        CONFIGURE_ARGS: ${{ inputs.configure-args }}
+        MAKE_ARGS: ${{ inputs.make-args }}
+        CARGO_ARGS: ${{ inputs.cargo-args }}
+        GO_PACKAGES: ${{ inputs.go-packages }}
+        ARTIFACTS: ${{ inputs.artifacts }}

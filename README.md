@@ -1,16 +1,21 @@
 # MacBin
 
-MacBin builds macOS binaries for your GitHub projects on
-[CI Runner Farm](https://github.com/unraid/ci-runner-farm) runners on Unraid, with no Mac and no
-Apple SDK. It adds zig (as the macOS cross compiler), LLVM's Mach-O tools, Rust, Go and
-[rcodesign](https://github.com/indygreg/apple-platform-rs) to the farm's runner image. It builds
-CMake, Meson, Autotools, Make, Cargo (Rust) and Go projects for Apple Silicon (arm64), Intel
-(x86_64), or both in one universal binary. It also bundles the project's own `.dylib`s, signs
-everything (ad-hoc, or with your Developer ID) and zips the results.
+MacBin builds macOS and Windows binaries for your GitHub projects on
+[CI Runner Farm](https://github.com/unraid/ci-runner-farm) runners on Unraid, with no Mac, no
+Windows machine and no Apple SDK. One runner image covers both:
 
-It's the macOS counterpart of [WinBin](https://github.com/Krippler/WinBin).
+- **macOS**: zig (as the macOS cross compiler), LLVM's Mach-O tools and
+  [rcodesign](https://github.com/indygreg/apple-platform-rs) build for Apple Silicon (arm64), Intel
+  (x86_64), or both in one universal binary. MacBin bundles the project's own `.dylib`s, signs
+  everything (ad-hoc, or with your Developer ID) and zips the results.
+- **Windows**: MinGW-w64 builds 64-bit and/or 32-bit `.exe`/`.dll` files, with the DLLs they need
+  copied next to them. See [Windows binaries](#windows-binaries).
 
-What the farm can't build:
+Both build CMake, Meson, Autotools, Make, Cargo (Rust) and Go projects. The Windows support was
+taken over from [WinBin](https://github.com/Krippler/WinBin), and MacBin doesn't need WinBin's
+repository or images.
+
+What the farm can't build for macOS:
 
 - **iOS apps, and macOS apps that use Apple frameworks or Swift** (Cocoa, SwiftUI, Metal, ...).
   These need Xcode and Apple's SDKs, which only run on a Mac. MacBin has a second workflow for them
@@ -24,7 +29,7 @@ In **Settings → Utilities → CI Runner Farm → Runner image**, change the fi
 `Dockerfile.github` to:
 
 ```dockerfile
-FROM ghcr.io/krippler/macbin:runner-base-0.1.0
+FROM ghcr.io/krippler/macbin:runner-base-0.2.0
 ```
 
 Leave the rest of the file as it is. Click **Build**, then **Restart** on the Fleet tab. If the
@@ -34,7 +39,7 @@ To update MacBin later, change the version number to a newer `runner-base-X.Y.Z`
 [package page](https://github.com/Krippler/MacBin/pkgs/container/macbin), then Build and Restart
 again. Use the same version in the workflow references below (`@vX.Y.Z`).
 
-## Building a project
+## Building a project for macOS
 
 Add this workflow to a project the farm runs jobs for:
 
@@ -46,7 +51,7 @@ on:
   workflow_dispatch:
 jobs:
   macos:
-    uses: Krippler/MacBin/.github/workflows/build-macos.yml@v0.1.0
+    uses: Krippler/MacBin/.github/workflows/build-macos.yml@v0.2.0
     permissions:
       contents: write   # to attach the zips to the release
     with:
@@ -101,17 +106,60 @@ on:
 | `NOTARY_API_KEY` | Optional: an App Store Connect API key, converted with `rcodesign encode-app-store-connect-api-key -o key.json <issuer-id> <key-id> AuthKey_XXXX.p8`. Its content notarizes the zips. |
 
 ```yaml
-    uses: Krippler/MacBin/.github/workflows/build-macos.yml@v0.1.0
+    uses: Krippler/MacBin/.github/workflows/build-macos.yml@v0.2.0
     secrets: inherit
 ```
 
 If rcodesign reports a wrong password for a `.p12` exported with OpenSSL 3, export it again with
 `openssl pkcs12 -export -legacy ...`.
 
+## Windows binaries
+
+Projects that need Windows builds use `build-windows.yml` on the same runners, in its own workflow
+or next to the macOS job:
+
+```yaml
+# .github/workflows/binaries.yml
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+jobs:
+  macos:
+    uses: Krippler/MacBin/.github/workflows/build-macos.yml@v0.2.0
+    permissions:
+      contents: write
+  windows:
+    uses: Krippler/MacBin/.github/workflows/build-windows.yml@v0.2.0
+    permissions:
+      contents: write
+    with:
+      arch: both
+```
+
+Each architecture gets a zip with the binaries, any DLLs they need, the project's license and
+README, and a `BUILDINFO.txt`. Projects that need MSVC (`.sln`/MSBuild) or .NET can't be built.
+
+| Input | Default | Description |
+|---|---|---|
+| `arch` | `x86_64` | `x86_64` (64-bit), `i686` (32-bit) or `both` |
+| `static` | `false` | `true` builds executables that don't need the MinGW runtime DLLs |
+| `build-system` | `auto` | Force `cmake`, `meson`, `autotools`, `make`, `cargo` or `go` |
+| `build-cmd` | | Your own build command, for projects that need one |
+| `subdir` | | Build from a subfolder of the repository |
+| `cmake-args`, `meson-args`, `configure-args`, `cargo-args` | | Extra build arguments |
+| `artifacts` | | Files to collect (globs), if the automatic detection misses them |
+| `env` | | Other settings as `KEY=VALUE` lines (see `winbin-build --help`) |
+| `release` | `true` | Attach the zips to the release on tag builds |
+| `artifact-name` | `windows-binaries` | Name of the uploaded artifact |
+
+On the runner the Windows tools are `winbin-build` and `winbin-batch`, the same commands as in
+WinBin, so build scripts written for WinBin keep working.
+
 ## Scheduled builds of other repositories
 
-The **Farm build** workflow in this repository builds everything listed in `farm/repos.txt` every
-night:
+The **Farm build** workflow in this repository builds everything listed in `farm/repos.txt` for
+macOS, and everything in `farm/windows-repos.txt` for Windows, every night:
 
 ```text
 BurntSushi/ripgrep @latest-tag
@@ -120,14 +168,16 @@ https://github.com/madler/zlib.git v1.3.1 CMAKE_ARGS="-DZLIB_BUILD_EXAMPLES=OFF"
 ```
 
 Each line is a repository, then optionally a ref (a branch, tag, commit, or `@latest-tag` for the
-newest version tag), then any `KEY=VALUE` options.
+newest version tag), then any `KEY=VALUE` options. A repository can be in both lists; `ARCH`
+means different things in each (see the option tables above).
 
 To turn it on, set the repository variable `MACBIN_FARM=true`. The results are uploaded as workflow
 artifacts.
 
 To have them written to an Unraid share instead, set the farm's `USER_SHARE_MOUNTS` to
 `/mnt/user/macbin/output:/mnt/macbin:rw` and the repository variable `MACBIN_OUTPUT_DIR` to
-`/mnt/macbin`. Commits that were already built are then skipped.
+`/mnt/macbin`. The builds land in `macos/` and `windows/` there, and commits that were already
+built are skipped.
 
 ## Optional: faster builds
 
@@ -152,7 +202,7 @@ on:
   workflow_dispatch:
 jobs:
   ios:
-    uses: Krippler/MacBin/.github/workflows/build-apple.yml@v0.1.0
+    uses: Krippler/MacBin/.github/workflows/build-apple.yml@v0.2.0
     permissions:
       contents: write
     with:
