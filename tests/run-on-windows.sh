@@ -14,8 +14,9 @@ for zip in "$dir"/*.zip; do
   powershell -NoProfile -Command \
     "Expand-Archive -LiteralPath '$(cygpath -w "$zip")' -DestinationPath '$(cygpath -w "$x")'"
   while IFS= read -r -d '' exe; do
-    if out=$("$exe" 2>&1) && grep -q '^hello from' <<<"${out//$'\r'/}"; then
-      echo "ok:   $(basename "$zip"): ${exe#"$x"/}: ${out//$'\r'/}"
+    # Windows programs end lines with CR LF; drop the CRs before matching.
+    if out=$("$exe" 2>&1 | tr -d '\r') && grep -q '^hello from' <<<"$out"; then
+      echo "ok:   $(basename "$zip"): ${exe#"$x"/}: $out"
       ran=$((ran + 1))
     else
       echo "FAIL: $(basename "$zip"): ${exe#"$x"/}: $out"; fail=1
