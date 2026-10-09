@@ -11,9 +11,9 @@ Windows machine and no Apple SDK. One runner image covers both:
 - **Windows**: MinGW-w64 builds 64-bit and/or 32-bit `.exe`/`.dll` files, with the DLLs they need
   copied next to them. See [Windows binaries](#windows-binaries).
 
-Both build CMake, Meson, Autotools, Make, Cargo (Rust) and Go projects. The Windows support was
-taken over from [WinBin](https://github.com/Krippler/WinBin), and MacBin doesn't need WinBin's
-repository or images.
+Both build CMake, Meson, Autotools, Make, Cargo (Rust) and Go projects. The Windows support used
+to be a separate project, WinBin, and now lives entirely in MacBin; see
+[Moving from WinBin](#moving-from-winbin).
 
 What the farm can't build for macOS:
 
@@ -155,6 +155,19 @@ README, and a `BUILDINFO.txt`. Projects that need MSVC (`.sln`/MSBuild) or .NET 
 
 On the runner the Windows tools are `winbin-build` and `winbin-batch`, the same commands as in
 WinBin, so build scripts written for WinBin keep working.
+
+### Moving from WinBin
+
+MacBin doesn't use anything from WinBin's repository or images, but anything that still points at
+WinBin stops working once WinBin is gone. Before shutting it down:
+
+| Where | Change |
+|---|---|
+| Farm `Dockerfile.github` | `FROM ghcr.io/krippler/winbin:runner-base-…` → `FROM ghcr.io/krippler/macbin:runner-base-0.2.0` |
+| Project workflows | `uses: Krippler/WinBin/.github/workflows/build-windows.yml@…` → `uses: Krippler/MacBin/.github/workflows/build-windows.yml@v0.2.0` (same inputs) |
+| Workflows using the action directly | `uses: Krippler/WinBin@…` → `uses: Krippler/MacBin/windows@v0.2.0` (same inputs) |
+| WinBin's `farm/repos.txt` | Move the lines to MacBin's `farm/windows-repos.txt`, and any `farm/patches/` folders too |
+| Farm build output share | Results now go to `windows/` under `MACBIN_OUTPUT_DIR` (see below) |
 
 ## Scheduled builds of other repositories
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Implementation of MacBin's Windows GitHub Action (windows/action.yml). It runs
-# on CI Runner Farm runners that use the MacBin runner image. Taken over from
-# WinBin (github.com/Krippler/WinBin, GPL-2.0), like the rest of windows/.
+# on CI Runner Farm runners that use the MacBin runner image. It started out in
+# WinBin, like the rest of windows/ (see windows/README.md).
 set -Eeuo pipefail
 
 err() { printf '::error title=MacBin::%s\n' "$*" >&2; exit 1; }

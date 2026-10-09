@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Tests the Windows GitHub Action (windows/action/run.sh) the way CI Runner
 # Farm runs it: inside the MacBin runner image, as the non-root "runner" user.
-# Ported from WinBin's tests/run-runner-tests.sh.
+# These started out as WinBin's action tests.
 #
 # Usage: tests/run-windows-tests.sh <runner-image> [zip-dir]
 # The produced zips are copied to zip-dir (if given) so tests/run-on-windows.sh
