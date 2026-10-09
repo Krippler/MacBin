@@ -1,21 +1,21 @@
 #!/usr/bin/env bash
-# Builds a CI Runner Farm runner image with MacBin's toolchains.
+# Builds a CI Runner Farm runner image with WMBin's toolchains.
 #
 # The farm's starter Dockerfile (cgroup/DinD bootstrap, KVM group handling,
 # cache directories, dockerd supervisor, health check) is fetched from
-# unraid/ci-runner-farm and only its FROM line is replaced with the MacBin
+# unraid/ci-runner-farm and only its FROM line is replaced with the WMBin
 # runner base, so the farm-specific parts are never copied into this repo.
 #
 # Usage: runner/build-farm-image.sh [tag]
 #   FARM_REF      ci-runner-farm git ref to take the starter from (default: main)
-#   BASE_IMAGE    runner base to put under it (default: ghcr.io/krippler/macbin:runner-base)
+#   BASE_IMAGE    runner base to put under it (default: ghcr.io/krippler/wmbin:runner-base)
 #   FARM_DOCKERFILE  use a local starter file instead of downloading it
 #   Extra arguments for "docker build" can be passed in DOCKER_BUILD_ARGS.
 set -Eeuo pipefail
 
 TAG=${1:-macbin:runner}
 FARM_REF=${FARM_REF:-main}
-BASE_IMAGE=${BASE_IMAGE:-ghcr.io/krippler/macbin:runner-base}
+BASE_IMAGE=${BASE_IMAGE:-ghcr.io/krippler/wmbin:runner-base}
 STARTER_PATH=src/usr/local/emhttp/plugins/ci-runner-farm/default.github.Dockerfile
 
 ctx=$(mktemp -d)
@@ -34,8 +34,8 @@ n=$(grep -c '^FROM ' "$ctx/starter.Dockerfile" || true)
 sed "s|^FROM .*|FROM $BASE_IMAGE|" "$ctx/starter.Dockerfile" >"$ctx/Dockerfile"
 {
   echo
-  echo "LABEL org.opencontainers.image.title=\"MacBin CI Runner Farm image\" \\"
-  echo "      org.opencontainers.image.source=\"https://github.com/Krippler/MacBin\" \\"
+  echo "LABEL org.opencontainers.image.title=\"WMBin CI Runner Farm image\" \\"
+  echo "      org.opencontainers.image.source=\"https://github.com/Krippler/WMBin\" \\"
   echo "      net.unraid.ci-runner-farm.starter-ref=\"$FARM_REF\""
 } >>"$ctx/Dockerfile"
 

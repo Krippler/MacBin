@@ -28,7 +28,7 @@ set -Eeuo pipefail
 # arrays that may be empty are expanded as ${a[@]+"${a[@]}"} (set -u).
 
 log()  { printf '[macbin-apple] %s\n' "$*" >&2; }
-die()  { printf '::error title=MacBin::%s\n' "$*" >&2; exit 1; }
+die()  { printf '::error title=WMBin::%s\n' "$*" >&2; exit 1; }
 
 [[ $(uname -s) == Darwin ]] || die "build-apple needs a macOS runner (runs-on: macos-latest or a self-hosted Mac)"
 
@@ -304,7 +304,7 @@ while IFS= read -r f; do files+=("$f"); done < <(find "$OUTPUT_DIR" -maxdepth 1 
   echo "MACBIN_EOF"
 } >>"${GITHUB_OUTPUT:-/dev/null}"
 {
-  echo "### MacBin ($PLATFORM): \`$BASE\`"
+  echo "### WMBin ($PLATFORM): \`$BASE\`"
   echo
   echo "| File | Size |"
   echo "|---|---|"

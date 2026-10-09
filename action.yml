@@ -1,5 +1,5 @@
-name: MacBin - build macOS binaries
-description: Cross-compile a project into macOS binaries on a CI Runner Farm runner that uses the MacBin runner image
+name: WMBin - build macOS binaries
+description: Cross-compile a project into macOS binaries on a CI Runner Farm runner that uses the WMBin runner image
 author: Krippler
 branding:
   icon: package
@@ -52,7 +52,7 @@ inputs:
     description: Globs of files to collect instead of automatic detection
     default: ""
   env:
-    description: Further MacBin settings, one KEY=VALUE per line
+    description: Further WMBin settings, one KEY=VALUE per line
     default: ""
   output-dir:
     description: Where results are written (default <runner temp>/macbin/output)

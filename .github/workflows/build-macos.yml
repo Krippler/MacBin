@@ -1,10 +1,10 @@
 # Reusable workflow: build macOS binaries for the calling repository on a
 # CI Runner Farm runner whose Dockerfile.github starts with
-#   FROM ghcr.io/krippler/macbin:runner-base-<version>
+#   FROM ghcr.io/krippler/wmbin:runner-base-<version>
 #
 #   jobs:
 #     macos:
-#       uses: Krippler/MacBin/.github/workflows/build-macos.yml@v0.2.0
+#       uses: Krippler/WMBin/.github/workflows/build-macos.yml@v0.3.0
 #       permissions:
 #         contents: write        # only needed to attach zips to releases
 #       with:
@@ -53,7 +53,7 @@ on:
         type: string
         default: ""
       env:
-        description: Further MacBin settings, one KEY=VALUE per line
+        description: Further WMBin settings, one KEY=VALUE per line
         type: string
         default: ""
       codesign:
@@ -91,7 +91,7 @@ jobs:
           submodules: recursive
 
       - id: macbin
-        uses: Krippler/MacBin@v0.2.0
+        uses: Krippler/WMBin@v0.3.0
         with:
           arch: ${{ inputs.arch }}
           macos-min: ${{ inputs.macos-min }}

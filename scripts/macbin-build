@@ -592,7 +592,7 @@ write_buildinfo() {
     echo "system:     $SYSTEM"
     echo "toolchain:  $TOOLCHAIN_DESC"
     echo "codesign:   $signing"
-    echo "built:      $(date -u +%Y-%m-%dT%H:%M:%SZ) by MacBin $MACBIN_VERSION"
+    echo "built:      $(date -u +%Y-%m-%dT%H:%M:%SZ) by WMBin $MACBIN_VERSION"
   } >"$dir/BUILDINFO.txt"
 }
 
@@ -652,7 +652,7 @@ main() {
   mkdir -p "$OUTPUT_DIR/_logs"
   exec > >(tee "$OUTPUT_DIR/_logs/$NAME.log") 2>&1
 
-  log "MacBin $MACBIN_VERSION: building $NAME @ $LABEL for ${ARCH,,} (macOS $MACOS_MIN+)"
+  log "WMBin $MACBIN_VERSION: building $NAME @ $LABEL for ${ARCH,,} (macOS $MACOS_MIN+)"
   BUILD_ROOT=$WORK_DIR/builds/$NAME
   SRC=$BUILD_ROOT/src
   fetch_source
@@ -678,7 +678,7 @@ main() {
 
   for a in "${archs[@]}"; do
     setup_toolchain "$a"
-    [[ -n ${MACBIN_NO_GROUPS:-} ]] || group "MacBin: $NAME $LABEL ($PLAT)"
+    [[ -n ${MACBIN_NO_GROUPS:-} ]] || group "WMBin: $NAME $LABEL ($PLAT)"
     log "[$PLAT] toolchain: $TOOLCHAIN_DESC"
     STAGE=$BUILD_ROOT/stage-$A BDIR=$BUILD_ROOT/build-$A ARCH_OUT=$work/$PLAT
     rm -rf "$STAGE" "$BDIR" "$ARCH_OUT"

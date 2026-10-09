@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# Implementation of MacBin's Windows GitHub Action (windows/action.yml). It runs
-# on CI Runner Farm runners that use the MacBin runner image. It started out in
+# Implementation of WMBin's Windows GitHub Action (windows/action.yml). It runs
+# on CI Runner Farm runners that use the WMBin runner image. It started out in
 # WinBin, like the rest of windows/ (see windows/README.md).
 set -Eeuo pipefail
 
-err() { printf '::error title=MacBin::%s\n' "$*" >&2; exit 1; }
+err() { printf '::error title=WMBin::%s\n' "$*" >&2; exit 1; }
 
 command -v winbin-build >/dev/null \
-  || err "winbin-build is not installed on this runner - run this job on a CI Runner Farm runner using the MacBin runner image"
+  || err "winbin-build is not installed on this runner - run this job on a CI Runner Farm runner using the WMBin runner image"
 
 # --- settings for winbin-build ---------------------------------------------
 # The named inputs arrive as environment variables (see action.yml).
@@ -63,11 +63,11 @@ mapfile -t zips < <(find "$dest" -maxdepth 1 -name '*.zip' | sort)
 } >>"${GITHUB_OUTPUT:-/dev/null}"
 
 {
-  echo "### MacBin (Windows): \`$rel\`"
+  echo "### WMBin (Windows): \`$rel\`"
   echo
   echo "| File | Size |"
   echo "|---|---|"
   find "$dest" -type f \( -iname '*.exe' -o -iname '*.dll' -o -iname '*.zip' \) -printf '%P\t%s\n' | sort \
     | while IFS=$'\t' read -r f size; do echo "| \`$f\` | $((size / 1024)) KiB |"; done
 } >>"${GITHUB_STEP_SUMMARY:-/dev/null}"
-echo "MacBin Windows output: $dest"
+echo "WMBin Windows output: $dest"

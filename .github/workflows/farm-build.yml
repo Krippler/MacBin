@@ -1,11 +1,11 @@
 # Builds every repository in farm/repos.txt for macOS and every one in
 # farm/windows-repos.txt for Windows, on a CI Runner Farm runner whose
-# Dockerfile.github starts FROM ghcr.io/krippler/macbin:runner-base-<version>.
+# Dockerfile.github starts FROM ghcr.io/krippler/wmbin:runner-base-<version>.
 # Results go to <output>/macos/ and <output>/windows/.
 #
 # Enable it by setting the repository variable MACBIN_FARM=true. Optional:
-#   MACBIN_OUTPUT_DIR  persistent output folder, e.g. /mnt/macbin when the farm
-#                      has USER_SHARE_MOUNTS="/mnt/user/macbin:/mnt/macbin:rw".
+#   MACBIN_OUTPUT_DIR  persistent output folder, e.g. /mnt/wmbin when the farm
+#                      has USER_SHARE_MOUNTS="/mnt/user/wmbin:/mnt/wmbin:rw".
 #                      Unchanged commits are then skipped on every run. Without
 #                      it the results are uploaded as a workflow artifact.
 #   MACBIN_RUNS_ON     JSON runner labels (default ["self-hosted"])
@@ -46,7 +46,7 @@ jobs:
           SHARE_DIR: ${{ vars.MACBIN_OUTPUT_DIR }}
         run: |
           command -v macbin-batch >/dev/null || {
-            echo "::error::This runner has no MacBin toolchain - start its Dockerfile.github FROM ghcr.io/krippler/macbin:runner-base-<version> (see README)"
+            echo "::error::This runner has no WMBin toolchain - start its Dockerfile.github FROM ghcr.io/krippler/wmbin:runner-base-<version> (see README)"
             exit 1
           }
           {

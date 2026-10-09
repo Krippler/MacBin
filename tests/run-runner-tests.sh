@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Tests the GitHub Action (action/run.sh) the way CI Runner Farm runs it:
-# inside the MacBin runner image, as the non-root "runner" user.
+# inside the WMBin runner image, as the non-root "runner" user.
 #
 # Usage: tests/run-runner-tests.sh <runner-image> [zip-dir]
 # The produced zips are copied to zip-dir (if given) so tests/run-on-mac.sh can
@@ -16,7 +16,7 @@ chmod 777 "$out"
 # A throwaway self-signed certificate for the Developer ID signing path.
 cert=$(mktemp -d)
 openssl req -x509 -newkey rsa:2048 -nodes -keyout "$cert/key.pem" -out "$cert/cert.pem" \
-  -days 1 -subj "/CN=Developer ID Application: MacBin Test (TEST000000)" 2>/dev/null
+  -days 1 -subj "/CN=Developer ID Application: WMBin Test (TEST000000)" 2>/dev/null
 openssl pkcs12 -export -keypbe PBE-SHA1-3DES -certpbe PBE-SHA1-3DES -macalg sha1 -inkey "$cert/key.pem" -in "$cert/cert.pem" -passout pass:secret \
   -out "$cert/test.p12" 2>/dev/null
 chmod 755 "$cert" && chmod 644 "$cert"/*
@@ -69,7 +69,7 @@ for fx in c-cmake cpp-meson c-autotools c-make rust-cargo go-mod; do
     echo "FAIL: $fx: $n universal, $arm arm64, $x86 x86_64 Mach-O files"; rc=1
   fi
 done
-grep -q "MacBin" "$GITHUB_STEP_SUMMARY" || { echo "FAIL: no step summary"; rc=1; }
+grep -q "WMBin" "$GITHUB_STEP_SUMMARY" || { echo "FAIL: no step summary"; rc=1; }
 
 # The CMake fixture links its executable against its own dylib: the
 # reference must point inside the output, with no build-machine rpaths left.
@@ -109,7 +109,7 @@ if (cd /tmp/ws/signed && GITHUB_WORKSPACE=$PWD GITHUB_REPOSITORY=test/signed ARC
       IN_ENV=SIGN_TIMESTAMP_URL=none \
       /action/run.sh) >/tmp/signed.log 2>&1; then
   dir=$(sed -n "s/^output-dir=//p" "$GITHUB_OUTPUT")
-  if rcodesign print-signature-info "$dir/macos-universal/hello_make" 2>/dev/null | grep -q "MacBin Test" \
+  if rcodesign print-signature-info "$dir/macos-universal/hello_make" 2>/dev/null | grep -q "WMBin Test" \
      && grep -q "developer-id" "$dir/macos-universal/BUILDINFO.txt" \
      && ! find /tmp/rt -name "macbin-secrets.*" | grep -q .; then
     echo "ok:   Developer ID signing"
